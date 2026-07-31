@@ -54,7 +54,7 @@ propriétaire ou par le sticky bit.
 | `sink.type_newlines` | `keep` | `keep`, `space`, `marker` |
 | `sink.file` | vide | obligatoire pour le sink `file` |
 | `ui.mode` | `notify` | `osd`, `notify`, `none` |
-| `ui.sound` | `false` | feedback sonore best-effort |
+| `ui.sound` | `false` | bips best-effort au début et à l'arrêt de la capture |
 | `ui.osd.helper` | `murmur-osd` | commande ou chemin du helper OSD |
 | `ui.osd.position` | `top-center` | `top-left`, `top-center`, `center` |
 | `ui.osd.success_timeout_ms` | `2500` | délai avant masquage d'un résultat non fautif, 0 autorisé |

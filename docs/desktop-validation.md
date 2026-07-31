@@ -163,8 +163,9 @@ pas depuis `go run` ni depuis un chemin du checkout.
 - [ ] Tuer `murmur-osd` vérifie les relances bornées et n'interrompt ni STT ni
   sink.
 - [ ] `ui.mode=none` n'affiche rien et ne tente aucune connexion D-Bus/OSD.
-- [ ] `ui.sound=true` joue un son à la readiness réelle; absence de lecteur ou de
-  fichier reste best-effort et ne fait pas échouer la session.
+- [ ] `ui.sound=true` joue un son à la readiness réelle puis à l'arrêt, y compris
+  sur annulation; absence de lecteur ou de fichier reste best-effort et ne fait
+  pas échouer la session.
 
 ## Providers, fallback et policy
 

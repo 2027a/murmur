@@ -276,12 +276,14 @@ composables.
 ## UI
 
 `ui.mode="notify"` utilise les notifications freedesktop, remplace la
-notification précédente et se dégrade en no-op si D-Bus est absent.
+notification précédente et se dégrade en no-op si D-Bus est absent. Leur titre
+suit le format compact `🟢 ACTION`, avec un rond orange en cas d'annulation et
+un rond rouge en cas d'erreur ou d'échec.
 `ui.mode="osd"` lance `murmur-osd` et lui transmet des états JSONL sans texte
 dicté; sa panne n'interrompt ni transcription ni livraison. L'installation OSD
 est volontairement optionnelle car elle ajoute Python/GTK/gtk-layer-shell.
-`ui.mode="none"` désactive l'affichage. `ui.sound=true` joue le son freedesktop
-par défaut au début effectif de la capture, en best-effort.
+`ui.mode="none"` désactive l'affichage. `ui.sound=true` joue un bip freedesktop
+au début effectif et à l'arrêt de la capture, en best-effort.
 
 Le groupe `[ui.osd]` configure `helper`, `position`, `success_timeout_ms` et
 `error_timeout_ms`. `general.ascii_quotes=true` sélectionne les guillemets ASCII

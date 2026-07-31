@@ -68,7 +68,7 @@ Le schéma ne possède pas de booléen séparé « authentification requise »:
 `doctor` résout un credential uniquement lorsqu'une source `api_key_*` est
 configurée. Le helper, la position et les délais OSD sont configurables; le
 fichier son reste le son freedesktop
-`/usr/share/sounds/freedesktop/stereo/message.oga`.
+`/usr/share/sounds/freedesktop/stereo/bell.oga`.
 
 Tous les effets externes sont injectables via `doctor.Dependencies`: recherche
 d'executables, runtime, fichier, source PipeWire, providers, secrets, D-Bus et

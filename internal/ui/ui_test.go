@@ -106,11 +106,13 @@ func TestNotificationVisualCategories(t *testing.T) {
 		category string
 		summary  string
 	}{
-		{name: "starting", event: event(events.SessionStarted, "starting"), category: "murmur.starting", summary: "MURMUR  |  DÉMARRAGE"},
-		{name: "recording", event: event(events.CaptureReady, "recording"), category: "murmur.recording", summary: "MURMUR  |  ÉCOUTE"},
-		{name: "processing", event: event(events.StateChanged, "transcribing"), category: "murmur.processing", summary: "MURMUR  |  TRANSCRIPTION"},
-		{name: "success", event: events.Event{Type: events.Terminal, Result: "completed"}, category: "murmur.success", summary: "MURMUR  |  TERMINÉ"},
-		{name: "error", event: events.Event{Type: events.Terminal, Result: "failed"}, category: "murmur.error", summary: "MURMUR  |  ÉCHEC"},
+		{name: "starting", event: event(events.SessionStarted, "starting"), category: "murmur.starting", summary: "🟢 DÉMARRAGE"},
+		{name: "recording", event: event(events.CaptureReady, "recording"), category: "murmur.recording", summary: "🟢 ÉCOUTE"},
+		{name: "processing", event: event(events.StateChanged, "transcribing"), category: "murmur.processing", summary: "🟢 TRANSCRIPTION"},
+		{name: "degraded", event: event(events.Degraded, "error"), category: "murmur.warning", summary: "🔴 ATTENTION"},
+		{name: "success", event: events.Event{Type: events.Terminal, Result: "completed"}, category: "murmur.success", summary: "🟢 TERMINÉ"},
+		{name: "cancelled", event: events.Event{Type: events.Terminal, Result: "cancelled"}, category: "murmur.cancelled", summary: "🟠 ANNULÉ"},
+		{name: "error", event: events.Event{Type: events.Terminal, Result: "failed"}, category: "murmur.error", summary: "🔴 ÉCHEC"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -261,8 +263,8 @@ func TestOSDShowDoesNotBlockOnSlowHelper(t *testing.T) {
 	osd.Close()
 }
 
-func TestSoundCascadeStopsOnSuccess(t *testing.T) {
-	called := make(chan struct{}, 3)
+func TestSoundPlaysWhenCaptureStartsAndStops(t *testing.T) {
+	called := make(chan struct{}, 4)
 	executor := &sysexec.FakeExecutor{RunFunc: func(_ context.Context, name string, _ []string, _ []byte) ([]byte, error) {
 		called <- struct{}{}
 		if name == "pw-play" {
@@ -274,9 +276,27 @@ func TestSoundCascadeStopsOnSuccess(t *testing.T) {
 	sound.Show(event(events.CaptureReady, "recording"))
 	waitSignal(t, called)
 	waitSignal(t, called)
+	sound.Show(event(events.StateChanged, "stopping"))
+	waitSignal(t, called)
+	waitSignal(t, called)
+	sound.Show(events.Event{Type: events.Terminal, Result: "completed"})
 	sound.Close()
 	calls := executor.Calls()
-	if len(calls) != 2 || calls[0].Name != "pw-play" || calls[1].Name != "paplay" {
+	if len(calls) != 4 || calls[0].Name != "pw-play" || calls[1].Name != "paplay" ||
+		calls[2].Name != "pw-play" || calls[3].Name != "paplay" {
+		t.Fatalf("sound calls = %#v", calls)
+	}
+}
+
+func TestSoundPlaysWhenActiveCaptureIsCancelled(t *testing.T) {
+	executor := &sysexec.FakeExecutor{RunFunc: func(context.Context, string, []string, []byte) ([]byte, error) {
+		return nil, nil
+	}}
+	sound := NewSound(NewNone(), executor, "/sound.oga", func(string, ...any) {})
+	sound.Show(event(events.CaptureReady, "recording"))
+	sound.Show(events.Event{Type: events.Terminal, Result: "cancelled"})
+	sound.Close()
+	if calls := executor.Calls(); len(calls) != 2 {
 		t.Fatalf("sound calls = %#v", calls)
 	}
 }
