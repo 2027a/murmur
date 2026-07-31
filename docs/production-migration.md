@@ -6,6 +6,10 @@ Murmur est installé dans `~/.local` et constitue le chemin principal du bureau.
 La configuration effective est `~/.config/murmur/config.toml`, suivie dans les
 dotfiles sous `murmur/config.toml`.
 
+Cette migration constitue une exécution partielle de la validation desktop
+T8.4. La checklist complète et la séparation entre points validés et encore
+ouverts sont dans [`desktop-validation.md`](desktop-validation.md).
+
 Chemin de production validé:
 
 - source PipeWire par défaut: RØDE NT-USB+ Mono;
@@ -56,9 +60,14 @@ orange à l'annulation et rouge à l'échec.
 
 ## Restant À Valider
 
+T8.4 reste partiellement exécutée: seuls les points de validation desktop
+listés ci-dessus sont acquis. Restent ouverts:
+
 - dictée réelle dépassant 60 secondes et chunking post-capture;
 - vingt cycles quotidiens sans fuite de processus ou de fichiers;
 - reprise après indisponibilité temporaire du provider LAN;
+- couverture des autres applications prévues par la checklist;
 - reconnexion de session Wayland;
 - OSD, son, live chunking, fallback cloud et Markdown avant toute
-  activation de ces options.
+  activation de ces options;
+- tout test réel d'un provider cloud.

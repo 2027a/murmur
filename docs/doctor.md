@@ -16,7 +16,35 @@ Les messages ne contiennent ni secret ni corps de reponse provider.
 
 Les commandes de diagnostic (`pw-cli`, helper OSD) reçoivent un environnement
 filtré sans les variables déclarées par `api_key_env`. La résolution des
-credentials utilise un exécuteur séparé et borné.
+credentials utilise un exécuteur séparé et borné soumis au même filtre, sur tous
+les providers du snapshot et pas seulement ceux que `doctor` vérifie.
+
+Chaque check externe effectivement exécuté possède son propre budget de cinq
+secondes: résolution d'un credential, `pw-cli info`, health provider, ping D-Bus
+ou `<helper OSD> --check`. Pour un `api_key_command`, ce plafond de `doctor` à
+cinq secondes est plus court que le timeout interne du resolver et constitue
+donc le timeout effectif. Une expiration annule le check. Pour les commandes
+exécutées via `sysexec`, tout le groupe de processus est alors tué et le processus
+lancé est récolté. L'expiration produit un check `failed`, puis `doctor` continue
+les checks indépendants. Le contexte transmis à `doctor.Run` reste prioritaire:
+son annulation interrompt chaque check en cours et tous les checks suivants
+reçoivent immédiatement cette annulation.
+
+Les checks étant séquentiels, leur budget cumulé vaut `5 s × N`, où `N` est le
+nombre de checks bornés réellement exécutés. Il dépend donc de la configuration
+et des échecs précédents: un credential en échec saute le health correspondant.
+Une configuration exécutant une source explicite, trois résolutions de
+credentials (STT principal, fallback et cleanup), deux health STT et une UI
+D-Bus ou OSD cumule au pire 35 s de budgets externes. Il n'existe pas de plafond
+global fixe. Un contexte global plus court réduit cette somme; les accès
+locaux au système de fichiers et les recherches d'exécutables ne constituent pas
+une promesse de deadline globale.
+
+Le premier check applique exactement `config.Validate`. En cas d'échec, le
+rapport ne contient que `configuration et policy` avec ce même message, puis
+s'arrête avant runtime, recherche d'outil, source PipeWire, helper, UI ou réseau.
+Cela couvre notamment modèles vides, raccourcis inconnus, combinaisons clipboard
+non persistantes et dépassements des bornes documentées.
 
 ## Matrice conditionnelle
 
@@ -58,9 +86,13 @@ d'acceptation 14.
 Lorsque le réglage vaut `true`, `health_endpoint` est obligatoire et `doctor`
 utilise le même client et le même contrat `Health` que le cœur. Le timeout du
 diagnostic est plafonné à cinq secondes, les redirections restent refusées et le
-credential reste limité à la requête initiale. Un endpoint absolu, depuis
-l'origine (`/health`) ou relatif à `base_url` suit les règles documentées dans
-[`providers.md`](providers.md). `doctor` ne dérive jamais `/models`.
+credential reste limité à la requête initiale. Chaque résolution de credential
+reçoit le même plafond local de cinq secondes; un délai interne effectivement
+plus court et l'annulation globale restent prioritaires. L'endpoint est résolu et
+validé avant la résolution du credential: une URL absolue doit garder l'origine
+de `base_url`, et la même règle HTTPS s'applique en zone `internet`. Un endpoint
+depuis l'origine (`/health`) ou relatif à `base_url` suit les règles documentées
+dans [`providers.md`](providers.md). `doctor` ne dérive jamais `/models`.
 
 ## Limites du schéma
 

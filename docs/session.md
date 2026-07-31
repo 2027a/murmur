@@ -62,13 +62,39 @@ Un conflit retourne `unavailable` avec le message `une session est déjà active
 
 - l'identifiant et le résultat terminal;
 - l'erreur classifiée éventuelle, sans cause brute;
-- le provider effectivement utilisé;
+- le provider effectivement utilisé, ou `mixed` lorsque plusieurs providers ont
+  contribué;
 - les horodatages de début et de fin;
-- les avertissements de dégradation.
+- les avertissements de dégradation structurés par `class`, `provider`,
+  `component` et message contrôlé.
 
-L'orchestrateur écrit ce résultat avant de fermer le socket et de libérer le
-verrou. `session.ReadLastResult` rejette les champs JSON inconnus et les
-résultats non terminaux.
+Avant d'exposer le socket, `session.MarkLastResultPending` remplace atomiquement
+`last-result.session.json` en `0600` avec l'identifiant de la nouvelle session et
+`pending=true`. Si cette invalidation échoue, notamment par permissions ou
+`ENOSPC`, le démarrage échoue avant qu'une nouvelle session existe et l'ancien
+résultat reste valide. Une fois le marqueur posé, un crash ou un échec de writer,
+de renommage ou de synchronisation ne peut rendre l'ancien `session_id` courant:
+le JSON précédent reste entier mais `session.ReadLastResult` le classe comme
+périmé.
+
+L'orchestrateur écrit le résultat atomique avant de fermer le socket et de
+libérer le verrou. Après fermeture du journal et ajout éventuel du warning
+MUR-019, `session.CommitLastResult` remplace atomiquement le marqueur avec
+`pending=false`; ce commit est le seul point qui rend le résultat lisible par
+`status`. L'erreur de l'écriture initiale reste suivie séparément de l'erreur
+métier: le commit exige que cette écriture et l'éventuelle réécriture après
+fermeture du journal aient toutes deux réussi. Une écriture, une réécriture ou
+un commit raté laisse donc un diagnostic durable, sans fichier partiel. Le
+marqueur validé reste dans le runtime: la session suivante le remplace, et le
+nettoyage normal du runtime l'emporte avec les autres fichiers éphémères.
+
+`session.ReadLastResult` lit d'abord le résultat puis le marqueur, rejette les
+champs JSON inconnus et les résultats non terminaux. Cet ordre évite qu'une
+lecture concurrente accepte l'ancien fichier après le remplacement du marqueur.
+Un `last-result.json` sans marqueur, produit par une version antérieure, reste
+lisible jusqu'au prochain démarrage. Les warnings STT et pipeline gardent la même
+classe dans les événements `degraded` et dans `last-result.json`; aucune cause
+brute n'est persistée.
 
 ## Orchestration
 
@@ -76,7 +102,8 @@ résultats non terminaux.
 déjà résolu par le parent:
 
 1. résolution des secrets STT, fallback et cleanup via
-   `config.SecretResolver` et `sysexec.Executor`;
+   `config.SecretResolver` et `sysexec.Executor`, avec l'environnement parent
+   privé de tous les noms `api_key_env` du snapshot, providers inactifs compris;
 2. transports réseau bornés par la zone et les CIDR effectifs;
 3. chaîne STT principal/fallback, pipeline `protect-cleanup-render`, sink
    enveloppé par `sink.Once`, UI et recorder `pw-record`;
@@ -104,8 +131,26 @@ ce recorder, relit le header final, extrait le reliquat depuis le dernier curseu
 ferme l'entrée du pool, attend tous les workers et réordonne les résultats avant
 d'exécuter une seule fois le pipeline cleanup/plugin et le sink. Les événements
 `partial_started`, `partial_done` et `partial_failed` portent l'index 1-based et
-le provider de chaque tentative. Le total reste omis tant que la capture n'est
-pas terminée.
+le provider de chaque tentative réellement lancée, en capture live comme après
+capture. `partial_started` est émis juste avant l'appel provider; `partial_done`
+ou `partial_failed` conserve le même index original. Un arrêt anticipé, une
+annulation ou un dépassement de budget ne produit aucun `partial_started` pour
+les tentatives non lancées. Chaque reprise par fallback forme de nouvelles
+tentatives identifiées par son propre provider. Le total reste omis tant que la
+capture n'est pas terminée.
+
+Lorsqu'un budget STT est dépassé en live, l'orchestrateur annule le forwarder
+avant d'aborter la capture et de l'attendre. Le pool STT ne détache aucun drain du
+canal de segments; le résultat terminal conserve le provider de la tentative qui
+a franchi la limite.
+
+La demande de stop emprunte un plan de contrôle distinct du transfert des
+segments. Même si les workers, l'entrée du pool et la file du recorder sont tous
+pleins, elle déclenche l'arrêt borné de `pw-record` sans attendre leur drainage.
+La fermeture du flux et l'attente des workers restent séquentielles après cet
+arrêt: elles peuvent retarder la transcription finale, mais jamais prolonger la
+capture. La contre-pression n'ajoute aucune file non bornée et les index sont
+assemblés sans duplication dans leur ordre d'origine.
 
 Un échec non récupéré termine la session en `failed` avant le pipeline et le
 sink. Les récupérations partielles et le mélange de providers sont deux opt-ins
@@ -116,8 +161,12 @@ survit à `Run`.
 Pendant `starting` et `recording`, l'orchestrateur observe aussi la terminaison
 du recorder. Une sortie de `pw-record` non provoquée par stop ou cancel termine
 immédiatement en `failed`/`audio_failed`, persiste le résultat et n'appelle jamais
-le sink. Le stop et l'annulation demandés restent des fins normales et ne sont
-pas reclassés à cause de la fermeture concomitante du signal `Done`.
+le STT ni le sink en capture non-live, même si une demande de stop était déjà en
+attente. Le recorder arbitre atomiquement la sortie et la prise en charge du stop:
+une sortie observée la première ne peut donc pas transformer son WAV partiel en
+capture réussie. Le stop et l'annulation pris en charge les premiers restent des
+fins normales et ne sont pas reclassés à cause de la fermeture concomitante du
+signal `Done`.
 
 Après adoption du verrou, `session.Bootstrap` fait entrer l'unique machine d'état
 dans `starting` et l'expose immédiatement sur le socket. La résolution bornée des
@@ -132,26 +181,67 @@ jamais tuée au milieu de son en-tête WAV. Un helper `api_key_command` annulé 
 expiré est tué avec tout son groupe de processus.
 
 Une annulation de `starting` à `processing` annule le contexte des opérations,
-abandonne la capture et interdit tout appel au sink. Le passage atomique à
-`delivering` ferme cette fenêtre: une annulation tardive est refusée et la
-livraison en cours termine. Les appels concurrents ne peuvent donc produire
-qu'un résultat terminal et au plus une livraison.
+abandonne la capture et interdit tout effet de sink, y compris les copies
+clipboard brute et finale. Une sortie vide ou en erreur du processing possède la
+même garantie. Le passage atomique à `delivering` ferme cette fenêtre avant le
+premier effet: une annulation tardive est refusée, puis `raw-and-clean` copie le
+brut et le final dans cet ordre avant de poursuivre le sink. Les appels
+concurrents ne peuvent donc produire qu'un résultat terminal et au plus une
+livraison.
 
 `SIGINT`, `SIGTERM` et `SIGHUP` suivent le même chemin que `cancel`. Les enfants
 externes appartiennent à leurs propres groupes de processus et sont arrêtés par
 `sysexec`; la session ferme ensuite l'UI, le socket et le verrou. Les événements
 IPC/UI ne transportent jamais le transcript.
 
-L'événement terminal reprend le provider effectif et la classe de l'erreur qui a
-réellement terminé la session. `cancelled` et `no_speech` restent des résultats
-terminaux distincts et ne sont pas présentés comme `failed`.
+La fermeture UI intervient après la publication du terminal et en draine
+explicitement la dernière remise. Les notifications annulent une notification
+intermédiaire bloquée au profit du terminal et ferment leur client sous un budget
+de 2,25 s. L'OSD écrit le terminal avant de fermer stdin, laisse le helper sortir
+après son délai d'affichage configuré, puis le tue et le récolte au dépassement.
+Sans terminal, les deux UI abandonnent immédiatement le travail intermédiaire;
+l'OSD n'accorde que 250 ms à la sortie sur EOF. Aucun worker UI ni helper OSD ne
+survit au retour de `Run`.
+
+L'événement `provider_selected`, les événements globaux suivants et l'événement
+terminal reprennent le provider effectif, ou `mixed` pour une transcription
+multi-provider. Les événements de segment conservent leur provider propre.
+L'événement terminal reprend aussi la classe de l'erreur qui a réellement
+terminé la session. `cancelled` et `no_speech` restent des résultats terminaux
+distincts et ne sont pas présentés comme `failed`.
 
 ## Journal borné
 
+Le processus détaché prépare d'abord `murmur.log` dans le runtime privé, en
+`0600`, puis redirige son `stderr` brut vers `/dev/null`. Après lecture du snapshot
+validé, le logger JSONL ouvre son writer dédié et prend en charge la rotation
+bornée. Les helpers ne peuvent donc pas injecter leur stderr dans ce fichier. Les
+niveaux `debug`, `info`, `warn` et `error` ont des seuils distincts; les
+composants et champs persistés sont fermés et les messages UI ne reprennent
+jamais une cause brute. Une panne du logger est best-effort et ne rappelle pas le
+logger.
+
 Le processus interactif peut abonner un journal au bus avant le bootstrap. Le
-fichier actif est `$XDG_RUNTIME_DIR/murmur/session.jsonl`; sa taille et le nombre
+fichier actif est `session.jsonl` dans le runtime Murmur résolu selon
+[`configuration.md`](configuration.md); sa taille et le nombre
 de rotations sont contrôlés par `[logging]`. `Close` draine la file bornée avant
 de fermer le fichier. Les lignes utilisent le schéma fermé `events.Event`, qui
 n'a aucun champ de transcript, secret, prompt ou corps provider. Comme tous les
 abonnés du bus, le journal peut abandonner des événements sous surcharge et ne
 constitue pas un audit exhaustif.
+
+Le journal mémorise sa première erreur d'encodage, d'inspection, de rotation,
+d'écriture, de réouverture ou de fermeture. Son callback de dégradation ne reçoit
+que le nom fermé de l'opération: il ne repasse pas par le bus et ne peut donc ni
+boucler sur le journal ni transporter transcript, prompt, corps HTTP ou secret.
+Le logger et `last-result.json` utilisent des messages constants sans cause ni
+chemin. `Close` draine les événements, retourne la première cause locale utile,
+et la session ajoute alors un warning `internal/session-journal`. Une erreur
+transitoire de `Stat`, `Rename`, `Write` ou réouverture ne désactive pas le
+worker: le descripteur courant reste actif et les événements suivants retentent
+la rotation puis l'écriture.
+
+Le writer du journal événementiel et celui du log opérationnel sont deux
+instances indépendantes avec des fichiers, limites et erreurs distincts. Cette
+séparation est volontaire: le diagnostic d'une panne du journal, de l'OSD ou de
+D-Bus ne dépend pas du canal événementiel qu'il doit diagnostiquer.

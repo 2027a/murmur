@@ -6,11 +6,20 @@ le verrou puis ré-exécute le binaire avec des descripteurs hérités.
 
 ## Transport et permissions
 
-Le serveur écoute sur `$XDG_RUNTIME_DIR/murmur/session.sock`, dans un répertoire
-`0700`; le socket est forcé à `0600`. Une connexion transporte une requête JSON
-suivie d'un saut de ligne et, sauf pour `subscribe`, une réponse JSON suivie d'un
-saut de ligne. Les champs inconnus, le JSON invalide et les versions inconnues
-sont refusés.
+Le serveur et toutes les commandes clientes résolvent le même chemin déterministe:
+`$XDG_RUNTIME_DIR/murmur/session.sock`, ou `/run/user/<euid>/murmur/session.sock`
+si la variable est absente. Ce second parent doit déjà exister, être réel,
+appartenir à l'EUID et être en `0700`; Murmur échoue plutôt que de se replier
+sous `/tmp`. Les composants et le sous-répertoire `murmur` sont ouverts ou créés
+avec des opérations ancrées à des descripteurs et sans suivre de symlink. Le
+répertoire applicatif est en `0700`; le socket est forcé à `0600`. Une connexion
+transporte exactement une requête JSON sur une ligne d'au plus 4 Kio, LF compris,
+et, sauf pour `subscribe`, une réponse JSON suivie d'un saut de ligne. Le LF est
+obligatoire; le serveur n'attend pas la fermeture de la moitié écriture. Un EOF
+prématuré ou une ligne trop longue vaut `config_invalid`. Après l'unique valeur
+JSON, seuls les blancs JSON sont admis avant le LF. Les champs inconnus, le JSON
+invalide, une seconde valeur et les versions inconnues sont refusés sans appeler
+le gestionnaire.
 
 Les lectures et écritures du handshake sont bornées à deux secondes par défaut.
 Le client classe un socket absent ou refusé comme `ipc.ErrNoSession`
@@ -71,11 +80,23 @@ une erreur d'écriture:
 {"v":1,"type":"state_changed","timestamp":"2026-07-29T12:34:56Z","session_id":"session-1","state":"transcribing"}
 ```
 
+La connexion reste néanmoins à requête unique: tout octet envoyé par le client
+après le LF de `subscribe` ferme le flux et n'est jamais interprété comme une
+seconde requête.
+
 Types possibles: `session_started`, `capture_ready`, `state_changed`,
 `partial_started`, `partial_done`, `partial_failed`, `provider_selected`,
 `degraded`, `delivered`, `terminal`. Les champs optionnels sont `state`,
 `result`, `provider`, `error_class`, `component`, `partial` et `total`. La
 structure exclut volontairement tout champ de texte libre ou transcript.
+Pour une transcription multi-provider, les événements globaux utilisent
+`provider="mixed"`; les événements partiels gardent le provider du segment.
+`partial` est l'index original du segment converti en base 1. Chaque tentative
+provider réellement lancée publie `partial_started`, puis `partial_done` ou
+`partial_failed` avec le même index et le même provider. Un fallback constitue
+une nouvelle tentative; les segments non tentés après arrêt anticipé, annulation
+ou dépassement de budget ne publient aucun `partial_started`. `total` est connu
+après capture et reste omis pendant la capture live.
 
 Le bus et chaque abonnement sont bornés et non bloquants. Un client lent peut
 perdre des événements; il doit reconstruire l'état via `status` plutôt que
@@ -96,6 +117,12 @@ disponible pendant le traitement après `stop`, jusqu'à la persistance du résu
 terminal. Il est ensuite fermé et supprimé avant la libération du verrou. Une
 erreur de construction suit le même ordre: événement et résultat terminal, puis
 fermeture du socket.
+
+Un `Server` est lié à l'unique listener créé par `ipc.Listen` et ne peut pas être
+resservi après son arrêt. `Close` est idempotent: il ferme le listener et toutes
+les connexions actives, annule le contexte dérivé transmis aux handlers, puis
+laisse `Serve` attendre leur terminaison. Un abonnement client observe alors
+`EOF` sans que l'appelant doive aussi annuler le contexte fourni à `Serve`.
 
 Le même `events.Bus` alimente IPC et UI. Les deux représentations partagent donc
 les états et la provenance, tandis que leur cadrage reste distinct: événement

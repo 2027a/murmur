@@ -11,6 +11,11 @@ Le cleanup reçoit donc le contexte global et n'est appelé qu'une fois. Les
 étages optionnels sont injectés via `textpipe.Cleanup` et `textpipe.Plugin`; le
 package n'importe aucun client réseau ni plugin concret. Une erreur d'étage
 optionnel conserve la meilleure version locale et ajoute un warning au résultat.
+Ce warning contient une `class` issue de `internal/errs`, un `component` fermé
+(`cleanup` ou `plugin`) et un message contrôlé. La cause, son texte et le
+composant éventuellement fourni par une implémentation ne sont jamais recopiés:
+un timeout, un refus de policy, un échec d'authentification ou une indisponibilité
+restent distinguables sans exposer le transcript ni un détail provider.
 
 ## Packs
 
@@ -43,7 +48,8 @@ le namespace, leur index et leur intention.
 `Validate` exige les mêmes tokens, une seule fois chacun, dans le même ordre et
 avec leur valeur exacte. Le pipeline refait cette validation avant le rendu:
 suppression, duplication, permutation ou altération entraîne le rejet du cleanup
-et un warning. Le renderer consomme tous les tokens générés avant le plugin.
+et un warning `empty_response`. Le renderer consomme tous les tokens générés
+avant le plugin.
 
 Exemple d'injection:
 

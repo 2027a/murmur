@@ -135,13 +135,15 @@ pas depuis `go run` ni depuis un chemin du checkout.
 - [ ] `paste` avec clipboard `none` frappe directement sans réutiliser un ancien
   presse-papiers.
 - [ ] `type` traite correctement ASCII, accents, ponctuation et texte long.
-- [ ] `type_newlines=keep|space|marker` produit les trois rendus documentés.
+- [ ] `type_newlines=space|marker|dangerous-keep` produit les trois rendus documentés et seul `dangerous-keep` injecte des LF.
 - [ ] `clipboard` laisse le texte final disponible sans injection.
 - [ ] `raw-and-clean` expose d'abord le STT brut puis le résultat final.
 - [ ] `clean-only` n'expose jamais le STT brut.
 - [ ] `none` ne lance jamais `wl-copy`.
-- [ ] `transient` tente l'effacement après succès et échec du sink; le résultat
-  avec un gestionnaire d'historique est noté explicitement.
+- [ ] `transient` tente l'effacement après succès et échec des sinks supportés;
+  le résultat avec un gestionnaire d'historique est noté explicitement.
+- [ ] un mode effectif `paste` avec raccourci et clipboard `transient` est refusé
+  avant capture; `type+transient` conserve l'ordre copie, frappe, clear.
 - [ ] `start --clipboard-only` remplace un sink global `paste` ou `type` et ne
   produit aucune injection.
 - [ ] `clipboard-only` refuse les politiques `none` et `transient` avant capture.
@@ -258,12 +260,33 @@ pas depuis `go run` ni depuis un chemin du checkout.
 
 ### Validation manuelle desktop
 
-Une première validation réelle a été exécutée le 31 juillet 2026 sur Hyprland,
-PipeWire et un provider LAN. Elle couvre capture, finalisation WAV, STT LAN,
-clipboard-only, frappe, collage, `cliphist`, notifications, concurrence,
-annulation, nettoyage et raccourcis principaux. Le compte-rendu et le rollback
-sont consignés dans [`production-migration.md`](production-migration.md).
+**Partiellement exécutée le 31 juillet 2026.** Le compte-rendu détaillé et le
+rollback sont consignés dans
+[`production-migration.md`](production-migration.md).
 
-Les cases concernant les dictées longues, les autres applications, la
-reconnexion Wayland et les fonctions optionnelles restent ouvertes. Aucun test
-réel de provider cloud n'est revendiqué.
+Validé sur Hyprland, PipeWire et le chemin de production avec provider LAN:
+
+- `doctor` humain et JSON entièrement verts;
+- capture foreground bornée sans clipboard ni injection;
+- finalisation WAV et transcription réelle par le provider LAN;
+- rendu des guillemets et paragraphes, puis copie clipboard-only;
+- frappe `wtype` réelle dans un éditeur;
+- collage réel et présence dans `cliphist`;
+- notifications d'écoute, de traitement et de réussite;
+- cleanup OpenRouter avec sentinelle protégée et sans fallback dégradé;
+- refus d'un second démarrage concurrent;
+- annulation terminale sans STT, sink ni processus orphelin;
+- raccourcis canary puis principal testés physiquement.
+
+Encore ouvert:
+
+- dictée de plus de 60 secondes et chunking post-capture;
+- vingt cycles quotidiens sans fuite de processus ou de fichiers;
+- reprise après indisponibilité temporaire du provider LAN;
+- couverture des autres applications prévues par cette checklist;
+- reconnexion de session Wayland;
+- OSD, son, live chunking, fallback cloud et plugin Markdown;
+- tout test réel d'un provider cloud.
+
+Les autres cases non cochées de cette checklist ne sont pas revendiquées comme
+validées.

@@ -23,11 +23,19 @@ et des sockets Unix sous `t.TempDir()`.
 | 17 | `internal/acceptance.TestAcceptance_17_SegmentFailureRestartsFallbackWithoutFalseProvider` | reprise intégrale des segments et provider effectif non mixte |
 | 18 | `internal/acceptance.TestAcceptance_18_EnglishCommandsMatchConfiguredTypography` | commandes anglaises via STT, pipeline et sink |
 | 19 | `internal/textpipe.TestAcceptance_19_PacksRemainIndependent` | extension anglaise sans changement du rendu français |
+| MUR-001 | `internal/acceptance.TestAcceptance_MUR001_UploadUsesValidatedBytesWithAndWithoutChunking` | substitution atomique neutralisée, suffixe hors RIFF exclu et PCM segmenté exact |
+| MUR-015 | `internal/acceptance.TestAcceptance_MUR015_MixedProviderProvenanceIsGlobalAndOrderIndependent` | provenance globale `mixed` en batch/live et détail provider conservé dans les deux ordres |
 
 Les tests comportementaux complémentaires couvrent les retries transmis par
 `core`, le health endpoint exact de `doctor`, les profils et leur précédence, le
 rendu `ascii_quotes`, le classement link-local LAN, le schéma cleanup séparé et
 la rotation du journal JSONL.
+
+Les tests MUR-001 complémentaires vérifient la politique fichier régulier
+(symlink final, FIFO et device refusés), le multipart borné au `memfd` RIFF
+scellé, l'immunité à une réécriture `WriteAt` du même inode et la
+fermeture/suppression des sources, segments et répertoires sur une erreur
+provider.
 
 `TestBinaryProcessStartReexecSocketStopAndCancel` construit le vrai binaire puis
 vérifie deux cycles complets. `start` ré-exécute `__session`, expose le socket,
@@ -40,8 +48,11 @@ Le sous-test `composable subprocesses` du scénario 12 construit aussi le vrai
 binaire. Avec `PATH` vide, il vérifie `transcribe` et `cleanup` contre un serveur
 `httptest`, le chunking, stdin/stdout, le contrat JSON, les événements JSONL et
 l'erreur WAV `audio_failed`. Un faux `pw-record`, sans outil desktop, couvre
-ensuite `dictate --sink stdout|file`. Le schéma JSON versionné est interprété et
-appliqué aux résultats représentatifs par `internal/cli.TestCommandResultConformsToDocumentedSchema`.
+ensuite `dictate` avec son sink `stdout` par défaut, son arrêt par signal
+synchronisé sur la lecture effective de stdin, et `dictate --sink file`. Le
+schéma JSON versionné est interprété et appliqué aux résultats représentatifs par
+`internal/cli.TestCommandResultFixtures` et
+`internal/cli.TestRealComposableCommandResultsConformToContract`.
 
 Les tests `internal/audio/pwrecord.TestLiveSingleProcessGrowingWAVHasExactPCMAndMergesTail`
 et `TestLiveAbortLeavesNoProcessOrCaptureWithRetention` utilisent exclusivement

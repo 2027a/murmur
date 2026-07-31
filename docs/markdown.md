@@ -104,7 +104,8 @@ commande vocale non consommée et absence de token technique. Une commande
 inconnue, non bornée ou une structure invalide fait échouer le plugin.
 
 Cette erreur est récupérable dans `textpipe`: le texte post-cleanup/post-render
-est livré sans réécriture partielle et un warning `plugin` est ajouté. Les
+est livré sans réécriture partielle et un warning `plugin` est ajouté. Sa classe
+typée est conservée, mais son texte et sa cause ne sont pas exposés. Les
 fixtures normatives sont dans
 `internal/plugin/markdown/testdata/fixtures.json`; elles reprennent les formes
 observées sur la branche historique `feat/markdown-v0-fixtures`, les ambiguïtés

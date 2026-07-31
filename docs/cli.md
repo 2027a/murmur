@@ -11,7 +11,7 @@ murmur status [--json]
 murmur doctor [--json]
 murmur transcribe [--json] [--events] <fichier.wav>
 murmur cleanup [--json] [--events]
-murmur dictate --sink stdout|file [--json] [--events]
+murmur dictate [--sink stdout|file] [--json] [--events]
 ```
 
 Une commande inconnue, un argument surnuméraire ou un flag non reconnu affiche
@@ -44,11 +44,24 @@ la commande l'arrête normalement.
 ## Status et doctor
 
 La forme humaine de `status` est l'état seul pour une session active. Au repos,
-elle affiche `idle` et le dernier résultat s'il existe. La forme JSON est stable:
+elle affiche `idle` et le dernier résultat s'il existe. Si sa liste de warnings
+contient `component="session-journal"`, la forme humaine ajoute `journal dégradé`;
+la forme JSON expose le warning contrôlé complet. Si une session plus récente a
+commencé mais que son résultat ou le commit final n'a pas pu être persisté,
+`status` n'expose jamais l'ancien résultat: la forme humaine indique
+`dernier résultat périmé: persistance incomplète`, et le JSON expose
+`last_result_stale=true` sans `last_result`. La forme JSON est stable:
 
 ```json
 {"v":1,"active":false,"state":"idle","last_result":{"v":1,"session_id":"...","result":"completed","started_at":"...","finished_at":"..."}}
 ```
+
+Une erreur de persistance reste une erreur opérationnelle de la session, mais ne
+reclasse pas son résultat métier terminal: un `completed` ou `cancelled` reste
+tel quel dans la valeur retournée par l'orchestrateur. Tant que son commit n'est
+pas confirmé, `status` préfère toutefois le diagnostic de péremption à un JSON
+potentiellement ancien. Si l'invalidation initiale échoue, `start` retourne 1
+avant l'exposition du socket et aucun résultat antérieur n'est périmé.
 
 `doctor` résout la même configuration effective que `start`, puis transmet cette
 valeur à `doctor.Run`. `--json` sélectionne le rapport structuré; un rapport avec
@@ -67,6 +80,10 @@ clipboard, sink d'injection, compositor, socket IPC ou recorder. Elle applique l
 provider principal, le fallback, la policy réseau, les secrets, le chunking puis
 une unique passe globale du pipeline cleanup/rendu/plugin. Sans `--json`, stdout
 contient le transcript final suivi d'un saut de ligne.
+
+Dans la sortie JSON, une transcription multi-provider expose
+`provider="mixed"`; `model` et `language` globaux sont alors vides, tandis que
+chaque entrée de `segments` conserve son provider, son modèle et sa langue.
 
 Les options peuvent précéder ou suivre le fichier:
 
@@ -99,23 +116,34 @@ repli silencieux vers un autre provider.
 
 `dictate` est la façade de capture foreground sans session IPC. Elle force
 `ui.mode=none`, `ui.sound=false` et `sink.clipboard_mode=none`; seuls `stdout` et
-`file` sont acceptés. Le sink fichier utilise le chemin résolu `sink.file` et son
-absence est une erreur `config_invalid`.
+`file` sont acceptés. Si `--sink` est omis, `stdout` est utilisé indépendamment
+de `sink.mode` dans la configuration. `--sink file` utilise le chemin résolu
+`sink.file`; son absence est toujours une erreur `config_invalid`.
 
 La capture commence avec `pw-record`, puis s'arrête proprement à EOF sur stdin ou
 à la réception de SIGINT, SIGTERM ou SIGHUP. Le signal signifie ici « terminer la
 capture et traiter », pas « annuler ». STT, chunking et pipeline sont ensuite les
-mêmes que pour `transcribe`. Avec `--json --sink stdout`, l'objet JSON constitue
-la représentation du sink stdout et le transcript texte n'est pas écrit une
-seconde fois. Avec `--sink file --json`, le fichier est livré et l'objet résultat
-reste seul sur stdout.
+mêmes que pour `transcribe`. Avec `--json` et le sink stdout, implicite ou
+explicite, l'objet JSON constitue la représentation du sink et le transcript
+texte n'est pas écrit une seconde fois. Avec `--sink file --json`, le fichier est
+livré et l'objet résultat reste seul sur stdout.
+
+Si `pw-record` s'arrête de lui-même après readiness, `dictate` n'attend pas EOF:
+la commande retourne 1 avec `audio_failed`, supprime la capture et n'appelle ni
+provider ni sink. Pour interrompre sa goroutine de lecture, le binaire ferme son
+stdin système, dont il possède le descripteur. Un lecteur injecté n'est jamais
+fermé par supposition: il est annulé seulement s'il implémente
+`CancelRead() error`. Sans cette abstraction, une lecture non annulable peut
+rester bloquée jusqu'au retour propre du lecteur, mais elle ne retarde pas la fin
+de la commande.
 
 ## Résultat JSON v1
 
 `--json` écrit exactement un objet sur stdout, en succès comme en échec. Sa forme
-normative est [`cli-result.schema.json`](cli-result.schema.json). Tous les champs
-sont toujours présents; les tableaux vides restent `[]` et l'absence d'erreur est
-`null`.
+normative Draft 2020-12 est
+[`cli-result.schema.json`](cli-result.schema.json). Tous les champs sont toujours
+présents; les tableaux vides restent `[]` et l'absence d'erreur est `null`.
+`success=true` impose `error=null`; `success=false` impose une erreur structurée.
 
 ```json
 {
@@ -144,11 +172,22 @@ sont toujours présents; les tableaux vides restent `[]` et l'absence d'erreur e
 
 Pour `transcribe` et `dictate`, `transcript_raw` est le transcript STT assemblé
 et `transcript_final` la sortie du pipeline global. Pour `cleanup`, ils désignent
-respectivement stdin et la sortie cleanup ou son repli. En cas de providers
-mixtes autorisés, le provider global peut être vide; chaque segment conserve son
-provider, modèle et langue effectifs.
+respectivement stdin et la sortie cleanup ou son repli; `segment_count` vaut
+alors zéro et `segments` reste vide. Pour une transcription, `segment_count` est
+la taille de `segments`, dont les index originaux sont uniques et strictement
+croissants, avec des trous possibles en récupération partielle. En cas de
+providers mixtes autorisés, le provider global vaut `mixed`, avec `model` et
+`language` globaux vides; chaque segment conserve son provider, modèle et langue
+effectifs. Avec un seul provider, ces métadonnées globales correspondent à
+celles des segments. Les égalités de compte, l'ordre des index et ces relations
+de provenance complètent le schéma, qui ne peut pas comparer ces champs entre
+eux.
 
 Chaque avertissement expose `class`, `provider`, `component` et `message`.
+Les dégradations cleanup/plugin conservent leur classe (`server_error`,
+`timeout`, `auth_failed`, `policy_blocked`, `unavailable`, etc.) dans ce JSON et
+dans l'événement `degraded` correspondant. Leur message et leur composant sont
+contrôlés par le pipeline, jamais dérivés du texte brut de l'erreur.
 `error` expose seulement `class`, `component` et un message contrôlé, sans cause
 interne ni secret. Un échec d'exécution retourne 1 après l'objet JSON. Une erreur
 d'usage ne produit pas d'objet et retourne 2.
@@ -165,6 +204,19 @@ stderr: l'erreur terminale est un événement JSONL et, avec `--json`, son déta
 est dans l'objet unique sur stdout. Sans `--events`, stderr reste réservé aux
 erreurs humaines. Il n'y a donc jamais de mélange entre flux résultat et flux
 d'événements.
+
+Une erreur d'écriture de stderr arrête immédiatement l'émission et force le code
+de sortie 1. Une erreur métier existante reste prioritaire: sa classe, son
+composant et son message contrôlé sont conservés dans le résultat JSON. Si le
+métier avait réussi, le résultat JSON devient un échec `internal` du composant
+`io`, sans reprendre le détail du writer. Sans `--json`, ni stdout ni stderr
+ne constituent un canal sûr pour ce diagnostic: seul le code de sortie le
+signale et le transcript n'est pas écrit.
+
+Un writer peut avoir écrit une partie du dernier objet avant de signaler son
+échec. Ce fragment JSON est irréparable sans protocole transactionnel;
+l'émetteur le laisse tel quel, mais n'ajoute ensuite ni événement ni texte
+humain. Les objets terminés qui le précèdent restent du JSONL valide.
 
 ## Stdout détaché
 
