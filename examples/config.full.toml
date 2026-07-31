@@ -1,0 +1,95 @@
+[general]
+profile = "cloud"
+command_pack = "auto"
+ascii_quotes = false
+
+[audio]
+source = ""
+keep_recordings = false
+
+[stt]
+provider = "speaches"
+fallback = "openai"
+chunk_seconds = 0
+live_chunking = false
+chunk_workers = 2
+allow_partial = false
+allow_mixed_providers = false
+
+[stt.providers.speaches]
+type = "openai-compatible"
+base_url = "http://10.0.0.10:8000/v1"
+model = "large-v3"
+language = "fr"
+prompt = ""
+timeout_s = 120
+zone = "lan"
+allow_insecure = false
+health_endpoint = "/health"
+health_enabled = true
+retries = 1
+retry_backoff_ms = 250
+
+[stt.providers.openai]
+type = "openai-compatible"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-transcribe"
+language = "fr"
+prompt = ""
+api_key_env = "OPENAI_API_KEY"
+timeout_s = 60
+zone = "internet"
+allow_insecure = false
+health_endpoint = ""
+health_enabled = false
+retries = 1
+retry_backoff_ms = 500
+
+[cleanup]
+enabled = true
+provider = "local-cleanup"
+prompt = "Corrige uniquement la forme du texte."
+
+[cleanup.providers.local-cleanup]
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8080/v1"
+model = "cleanup-model"
+timeout_s = 30
+zone = "local"
+allow_insecure = false
+
+[plugin]
+enabled = false
+mode = "plain"
+timeout_s = 2
+
+[policy]
+stt_zones = ["local", "lan", "internet"]
+cleanup_zones = ["local", "lan"]
+plugin_zones = ["local"]
+trusted_networks = ["10.0.0.0/24"]
+retain_diagnostics = false
+
+[sink]
+mode = "paste"
+auto_mode = "paste"
+clipboard_mode = "clean-only"
+paste_shortcuts = ["ctrl+shift+v", "shift+insert", "ctrl+v"]
+type_newlines = "keep"
+file = ""
+
+[ui]
+mode = "notify"
+sound = false
+
+[ui.osd]
+helper = "murmur-osd"
+position = "top-center"
+success_timeout_ms = 2500
+error_timeout_ms = 4000
+
+[logging]
+level = "info"
+session_journal = true
+session_max_bytes = 1048576
+session_max_files = 3

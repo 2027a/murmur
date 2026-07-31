@@ -1,0 +1,24 @@
+{
+  "language": "fr",
+  "quotes": {
+    "open": "« ",
+    "close": " »"
+  },
+  "variants": {
+    "open_quote": [
+      "ouvre les guillemets",
+      "ouvrez les guillemets"
+    ],
+    "close_quote": [
+      "ferme les guillemets",
+      "fermez les guillemets"
+    ],
+    "line_break": [
+      "a la ligne",
+      "à la ligne"
+    ],
+    "paragraph_break": [
+      "nouveau paragraphe"
+    ]
+  }
+}

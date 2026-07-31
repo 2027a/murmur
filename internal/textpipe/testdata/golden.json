@@ -1,0 +1,80 @@
+[
+  {
+    "name": "basic_quote_commands",
+    "pack": "fr",
+    "input": "Je dis ouvrez les guillemets bonjour fermez les guillemets.",
+    "intents": ["open_quote", "close_quote"],
+    "expected": "Je dis « bonjour »."
+  },
+  {
+    "name": "parasite_commas_around_quotes",
+    "pack": "fr",
+    "input": ", ouvre les guillemets, patate au beurre, ferme les guillemets, test.",
+    "intents": ["open_quote", "close_quote"],
+    "expected": "« patate au beurre », test."
+  },
+  {
+    "name": "line_and_paragraph_commands",
+    "pack": "fr",
+    "input": "alpha a la ligne beta nouveau paragraphe gamma",
+    "intents": ["line_break", "paragraph_break"],
+    "expected": "alpha\nbeta\n\ngamma"
+  },
+  {
+    "name": "punctuation_around_newlines",
+    "pack": "fr",
+    "input": "alpha. a la ligne, beta ; nouveau paragraphe: gamma",
+    "intents": ["line_break", "paragraph_break"],
+    "expected": "alpha\nbeta\n\ngamma"
+  },
+  {
+    "name": "ascii_quotes_mode",
+    "pack": "fr",
+    "input": "ouvre les guillemets salut ferme les guillemets",
+    "intents": ["open_quote", "close_quote"],
+    "expected": "\" salut \"",
+    "ascii_quotes": true
+  },
+  {
+    "name": "trim_leading_spaces_after_newline",
+    "pack": "fr",
+    "input": "un truc facile a la ligne  et meme si je continue",
+    "intents": ["line_break"],
+    "expected": "un truc facile\net meme si je continue"
+  },
+  {
+    "name": "accented_newline_command",
+    "pack": "fr",
+    "input": "alpha à la ligne beta",
+    "intents": ["line_break"],
+    "expected": "alpha\nbeta"
+  },
+  {
+    "name": "uppercase_plural_quote_commands",
+    "pack": "fr",
+    "input": "OUVREZ LES GUILLEMETS test FERMEZ LES GUILLEMETS",
+    "intents": ["open_quote", "close_quote"],
+    "expected": "« test »"
+  },
+  {
+    "name": "newline_and_paragraph_with_asr_punctuation",
+    "pack": "fr",
+    "input": "alpha ; à la ligne. beta, nouveau paragraphe ? gamma",
+    "intents": ["line_break", "paragraph_break"],
+    "expected": "alpha\nbeta\n\ngamma"
+  },
+  {
+    "name": "english_scenario_18",
+    "pack": "en",
+    "input": "open quotation marks test close quotation marks new line alpha new paragraph beta",
+    "intents": ["open_quote", "close_quote", "line_break", "paragraph_break"],
+    "expected": "“test”\nalpha\n\nbeta"
+  },
+  {
+    "name": "english_mixed_case_and_plural",
+    "pack": "en",
+    "input": "OPEN QUOTES hello CLOSE QUOTES",
+    "intents": ["open_quote", "close_quote"],
+    "expected": "“hello”"
+  }
+]

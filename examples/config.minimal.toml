@@ -1,0 +1,20 @@
+[general]
+profile = "local"
+
+[stt]
+provider = "local"
+# Le chemin historique reste actif: live_chunking=false et chunk_seconds=0.
+
+[stt.providers.local]
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+model = "large-v3"
+language = "fr"
+timeout_s = 120
+zone = "local"
+
+# Markdown reste opt-in. Pour l'activer: enabled = true, mode = "markdown".
+[plugin]
+enabled = false
+mode = "plain"
+timeout_s = 2

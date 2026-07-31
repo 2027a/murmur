@@ -1,0 +1,126 @@
+[
+  {
+    "name": "historical_heading_level_one_numeric",
+    "input": "commande stt titre 1 journal de bord fin du titre.",
+    "expected": "# journal de bord"
+  },
+  {
+    "name": "historical_heading_level_two_asr",
+    "input": "Commandes STT, titre niveau deux architecture fin du titre. Texte libre ensuite.",
+    "expected": "## architecture\n\nTexte libre ensuite."
+  },
+  {
+    "name": "bold_repeated_trigger_close",
+    "input": "Texte libre avant. commande stt gras note importante commande stt fin du gras. Encore du texte.",
+    "expected": "Texte libre avant. **note importante**. Encore du texte."
+  },
+  {
+    "name": "bold_live_asr",
+    "input": "Les commandes STT, GRAS, listes clarifient les idées, fin du GRAS, elles les regroupent.",
+    "expected": "Les **listes clarifient les idées**, elles les regroupent."
+  },
+  {
+    "name": "italic_apostrophe",
+    "input": "Le propos commande stt italique dans le réel fin de l'italique et évite les ambiguïtés.",
+    "expected": "Le propos *dans le réel* et évite les ambiguïtés."
+  },
+  {
+    "name": "bullet_list_bare_items",
+    "input": "Introduction. Commandes STT, liste à puces, item, annoncer l'objet item développement item conclusion fin de liste. Bien à toi.",
+    "expected": "Introduction.\n\n- annoncer l'objet\n- développement\n- conclusion\n\nBien à toi."
+  },
+  {
+    "name": "ordered_list_number_t",
+    "input": "commandes STT, liste numéro T, item numéro 1, cadre linux item numéro 2, cadre VQ fin de liste",
+    "expected": "1. cadre linux\n2. cadre VQ"
+  },
+  {
+    "name": "ordered_list_word_items",
+    "input": "Avant. commande stt liste numérotée item un acheter du pain item deux appeler Paul fin de liste. Ensuite.",
+    "expected": "Avant.\n\n1. acheter du pain\n2. appeler Paul\n\nEnsuite."
+  },
+  {
+    "name": "mixed_commands",
+    "input": "commande stt titre de niveau 1 journal fin titre. commande stt italique important fin italique.",
+    "expected": "# journal\n\n*important*."
+  },
+  {
+    "name": "heading_preserves_abbreviation_and_punctuation",
+    "input": "commande stt titre 1 Dr. Martin: état des lieux? Oui. fin du titre. Texte libre, intact.",
+    "expected": "# Dr. Martin: état des lieux? Oui.\n\nTexte libre, intact."
+  },
+  {
+    "name": "inline_preserves_ordinary_punctuation",
+    "input": "Voir commande stt gras Dr. Martin, vraiment? fin du gras; puis continuer.",
+    "expected": "Voir **Dr. Martin, vraiment?**; puis continuer."
+  },
+  {
+    "name": "bullet_items_keep_number_words_as_text",
+    "input": "commande stt liste à puces item un problème item deux pistes fin de liste",
+    "expected": "- un problème\n- deux pistes"
+  },
+  {
+    "name": "ordered_list_bare_markers",
+    "input": "commande stt liste numérotée item alpha item beta fin de liste",
+    "expected": "1. alpha\n2. beta"
+  },
+  {
+    "name": "ordinary_markdown_words_are_free_text",
+    "input": "Dr. Martin parle d'un titre, du gras et de la fin du titre.",
+    "expected": "Dr. Martin parle d'un titre, du gras et de la fin du titre."
+  },
+  {
+    "name": "adversarial_heading_without_explicit_end",
+    "input": "Avant commande stt titre 1 Dr. Martin. Texte libre ensuite.",
+    "expected": "Avant commande stt titre 1 Dr. Martin. Texte libre ensuite.",
+    "fallback": true
+  },
+  {
+    "name": "adversarial_ordered_sequence_gap",
+    "input": "commande stt liste numérotée item numéro 1 alpha item numéro 3 gamma fin de liste",
+    "expected": "commande stt liste numérotée item numéro 1 alpha item numéro 3 gamma fin de liste",
+    "fallback": true
+  },
+  {
+    "name": "adversarial_ordered_sequence_starts_at_two",
+    "input": "commande stt liste numérotée item numéro 2 beta fin de liste",
+    "expected": "commande stt liste numérotée item numéro 2 beta fin de liste",
+    "fallback": true
+  },
+  {
+    "name": "adversarial_ordered_sequence_repeats",
+    "input": "commande stt liste numérotée item numéro 1 alpha item numéro 1 encore fin de liste",
+    "expected": "commande stt liste numérotée item numéro 1 alpha item numéro 1 encore fin de liste",
+    "fallback": true
+  },
+  {
+    "name": "adversarial_ordered_mixed_markers",
+    "input": "commande stt liste numérotée item numéro 1 alpha item beta fin de liste",
+    "expected": "commande stt liste numérotée item numéro 1 alpha item beta fin de liste",
+    "fallback": true
+  },
+  {
+    "name": "adversarial_ordered_invalid_number",
+    "input": "commande stt liste numérotée item numéro zéro alpha fin de liste",
+    "expected": "commande stt liste numérotée item numéro zéro alpha fin de liste",
+    "fallback": true
+  },
+  {
+    "name": "adversarial_italic_without_explicit_end",
+    "input": "Avant commande stt italique texte libre. Après.",
+    "expected": "Avant commande stt italique texte libre. Après.",
+    "fallback": true
+  },
+  {
+    "name": "adversarial_list_without_explicit_end",
+    "input": "Avant commande stt liste à puces item alpha item beta. Après.",
+    "expected": "Avant commande stt liste à puces item alpha item beta. Après.",
+    "fallback": true
+  },
+  {
+    "name": "fallback_after_voice_tokens_are_rendered",
+    "input": "Avant ouvre les guillemets commande stt gras fermeture absente ferme les guillemets",
+    "expected": "Avant « commande stt gras fermeture absente »",
+    "fallback": true
+  }
+]

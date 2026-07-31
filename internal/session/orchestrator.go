@@ -1,0 +1,622 @@
+package session
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"git.2027a.net/mathieu/murmur/internal/audio"
+	"git.2027a.net/mathieu/murmur/internal/errs"
+	"git.2027a.net/mathieu/murmur/internal/events"
+	"git.2027a.net/mathieu/murmur/internal/ipc"
+	"git.2027a.net/mathieu/murmur/internal/sink"
+	"git.2027a.net/mathieu/murmur/internal/stt"
+	"git.2027a.net/mathieu/murmur/internal/textpipe"
+	"git.2027a.net/mathieu/murmur/internal/ui"
+)
+
+type Transcriber interface {
+	TranscribeSegments(context.Context, []stt.Segment) (stt.MultiResult, error)
+}
+
+type LiveTranscriber interface {
+	TranscribeStream(context.Context, <-chan stt.Segment, stt.Progress) (stt.MultiResult, error)
+}
+
+type Processor interface {
+	Run(context.Context, string) (textpipe.Result, error)
+}
+
+type OrchestratorOptions struct {
+	Context       context.Context
+	SessionID     string
+	RuntimeDir    string
+	Recorder      audio.Recorder
+	RecordOptions audio.RecordOptions
+	ChunkDuration time.Duration
+	LiveChunking  bool
+	Transcriber   Transcriber
+	Processor     Processor
+	Sink          sink.Sink
+	UI            ui.UI
+	Bus           *events.Bus
+	Now           func() time.Time
+	Machine       *Machine
+	StartedAt     time.Time
+}
+
+type Orchestrator struct {
+	machine     *Machine
+	runtimeDir  string
+	recorder    audio.Recorder
+	recordOpts  audio.RecordOptions
+	chunk       time.Duration
+	live        bool
+	transcriber Transcriber
+	processor   Processor
+	sink        sink.Sink
+	ui          ui.UI
+	bus         *events.Bus
+	now         func() time.Time
+	startedAt   time.Time
+
+	ctx        context.Context
+	cancelOps  context.CancelFunc
+	stop       chan struct{}
+	stopOnce   sync.Once
+	beginOnce  sync.Once
+	beginErr   error
+	runOnce    sync.Once
+	runDone    chan struct{}
+	metadataMu sync.Mutex
+	runResult  LastResult
+	runErr     error
+}
+
+type eventPublisher struct {
+	bus *events.Bus
+	ui  ui.UI
+}
+
+func (p eventPublisher) Publish(event events.Event) {
+	if p.bus != nil {
+		p.bus.Publish(event)
+	}
+	if p.ui != nil {
+		p.ui.Show(event)
+	}
+}
+
+func NewOrchestrator(options OrchestratorOptions) (*Orchestrator, error) {
+	if options.SessionID == "" || options.RuntimeDir == "" {
+		return nil, errs.New(errs.ConfigInvalid, "session", "identifiant ou répertoire de session manquant")
+	}
+	if options.Recorder == nil || options.Transcriber == nil || options.Processor == nil || options.Sink == nil {
+		return nil, errs.New(errs.Internal, "session", "dépendances de l'orchestrateur incomplètes")
+	}
+	if options.Context == nil {
+		options.Context = context.Background()
+	}
+	if options.Now == nil {
+		options.Now = time.Now
+	}
+	if options.UI == nil {
+		options.UI = ui.NewNone()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	o := &Orchestrator{
+		runtimeDir: options.RuntimeDir, recorder: options.Recorder, recordOpts: options.RecordOptions,
+		chunk: options.ChunkDuration, live: options.LiveChunking, transcriber: options.Transcriber, processor: options.Processor,
+		sink: sink.Once(options.Sink), ui: options.UI, bus: options.Bus, now: options.Now,
+		ctx: ctx, cancelOps: cancel, stop: make(chan struct{}, 1), runDone: make(chan struct{}),
+		startedAt: options.StartedAt,
+	}
+	o.machine = options.Machine
+	if o.machine == nil {
+		o.machine = NewMachine(options.SessionID, eventPublisher{bus: options.Bus, ui: options.UI})
+		o.machine.now = options.Now
+	} else if o.machine.sessionID != options.SessionID {
+		cancel()
+		return nil, errs.New(errs.Internal, "session", "machine de bootstrap incohérente")
+	} else {
+		o.machine.SetPublisher(eventPublisher{bus: options.Bus, ui: options.UI})
+	}
+	go func() {
+		select {
+		case <-options.Context.Done():
+			_ = o.Begin()
+			_ = o.cancel()
+		case <-o.runDone:
+		}
+	}()
+	return o, nil
+}
+
+// Begin enters starting before the IPC socket is exposed.
+func (o *Orchestrator) Begin() error {
+	o.beginOnce.Do(func() {
+		if o.startedAt.IsZero() {
+			o.startedAt = o.now().UTC()
+		}
+		if o.machine.Result() == "" && o.machine.State() == Idle {
+			o.beginErr = o.machine.Apply(StartCommand)
+		}
+	})
+	return o.beginErr
+}
+
+func (o *Orchestrator) Run() (LastResult, error) {
+	o.runOnce.Do(func() {
+		defer close(o.runDone)
+		defer o.ui.Close()
+		if err := o.Begin(); err != nil {
+			o.runErr = err
+			return
+		}
+		if o.machine.Result() == "" {
+			o.runErr = o.run()
+		}
+		o.runResult = o.finalResult(o.runErr)
+		if err := WriteLastResult(o.runtimeDir, o.runResult); err != nil {
+			o.runErr = errors.Join(o.runErr, err)
+		}
+	})
+	<-o.runDone
+	return o.runResult, o.runErr
+}
+
+func (o *Orchestrator) run() error {
+	if o.live {
+		return o.runLive()
+	}
+	return o.runCaptured()
+}
+
+func (o *Orchestrator) runCaptured() error {
+	recording, err := o.recorder.Start(o.ctx, o.recordOpts)
+	if err != nil {
+		return o.fail(err)
+	}
+	select {
+	case readyErr := <-recording.Ready():
+		if readyErr != nil {
+			_ = recording.Abort()
+			return o.fail(readyErr)
+		}
+	case <-recording.Done():
+		err := audioRecordingFailure(recording.Err())
+		_ = recording.Abort()
+		if o.machine.Result() != "" {
+			return nil
+		}
+		return o.fail(err)
+	case <-o.ctx.Done():
+		_ = recording.Abort()
+		return nil
+	}
+	if err := o.machine.Apply(CaptureReadyCommand); err != nil {
+		_ = recording.Abort()
+		if o.machine.Result() != "" {
+			return nil
+		}
+		return o.fail(err)
+	}
+	if o.machine.State() == Recording {
+		select {
+		case <-o.stop:
+		case <-recording.Done():
+			if o.machine.Result() != "" {
+				_ = recording.Abort()
+				return nil
+			}
+			if o.machine.State() != Stopping {
+				err := audioRecordingFailure(recording.Err())
+				_ = recording.Abort()
+				return o.fail(err)
+			}
+		case <-o.ctx.Done():
+			_ = recording.Abort()
+			return nil
+		}
+	}
+
+	file, err := recording.Stop(o.ctx)
+	if err != nil {
+		if o.machine.Result() != "" {
+			return nil
+		}
+		if errs.Classify(err) == errs.NoSpeech {
+			_ = o.machine.ApplyTerminal(NoSpeechCommand, o.currentProvider(), errs.NoSpeech)
+			return nil
+		}
+		return o.fail(err)
+	}
+	if err := o.machine.Apply(CaptureStoppedCommand); err != nil {
+		_, _ = file.Release()
+		if o.machine.Result() != "" {
+			return nil
+		}
+		return o.fail(err)
+	}
+
+	transcript, provider, warnings, err := o.transcribe(file)
+	return o.completeTranscript(transcript, provider, warnings, err)
+}
+
+func (o *Orchestrator) runLive() error {
+	recorder, ok := o.recorder.(audio.LiveRecorder)
+	if !ok {
+		return o.fail(errs.New(errs.Internal, "session", "recorder incompatible avec le découpage live"))
+	}
+	transcriber, ok := o.transcriber.(LiveTranscriber)
+	if !ok {
+		return o.fail(errs.New(errs.Internal, "session", "transcriber incompatible avec le découpage live"))
+	}
+	recording, err := recorder.StartLive(o.ctx, o.recordOpts, audio.LiveOptions{
+		SegmentDuration: o.chunk,
+		MinimumTail:     time.Second,
+	})
+	if err != nil {
+		return o.fail(err)
+	}
+	select {
+	case readyErr := <-recording.Ready():
+		if readyErr != nil {
+			_ = recording.Abort()
+			return o.fail(readyErr)
+		}
+	case <-recording.Done():
+		err := audioRecordingFailure(recording.Err())
+		_ = recording.Abort()
+		if o.machine.Result() != "" {
+			return nil
+		}
+		return o.fail(err)
+	case <-o.ctx.Done():
+		_ = recording.Abort()
+		return nil
+	}
+	if err := o.machine.Apply(CaptureReadyCommand); err != nil {
+		_ = recording.Abort()
+		if o.machine.Result() != "" {
+			return nil
+		}
+		return o.fail(err)
+	}
+
+	requests := make(chan stt.Segment)
+	forwarded := make(chan struct{})
+	go func() {
+		defer close(forwarded)
+		defer close(requests)
+		for segment := range recording.Segments() {
+			request := stt.Segment{Index: segment.Index, Request: stt.Request{
+				Audio: segment.File, Filename: filepath.Base(segment.File.Path()),
+			}}
+			select {
+			case requests <- request:
+			case <-o.ctx.Done():
+				return
+			}
+		}
+	}()
+	type transcriptionOutcome struct {
+		result stt.MultiResult
+		err    error
+	}
+	transcribed := make(chan transcriptionOutcome, 1)
+	go func() {
+		result, err := transcriber.TranscribeStream(o.ctx, requests, stt.Progress{
+			Started: func(index int, provider string) {
+				o.publish(events.PartialStarted, provider, "", "stt", index+1, 0)
+			},
+			Done: func(index int, provider string) {
+				o.publish(events.PartialDone, provider, "", "stt", index+1, 0)
+			},
+			Failed: func(index int, provider string, class errs.Class) {
+				o.publish(events.PartialFailed, provider, class, "stt", index+1, 0)
+			},
+		})
+		transcribed <- transcriptionOutcome{result: result, err: err}
+	}()
+
+	if o.machine.State() == Recording {
+		select {
+		case <-o.stop:
+		case <-recording.Done():
+			if o.machine.Result() != "" {
+				_ = recording.Abort()
+				<-forwarded
+				<-transcribed
+				return nil
+			}
+			if o.machine.State() != Stopping {
+				err := audioRecordingFailure(recording.Err())
+				o.cancelOps()
+				_ = recording.Abort()
+				<-forwarded
+				<-transcribed
+				return o.fail(err)
+			}
+		case <-o.ctx.Done():
+			_ = recording.Abort()
+			<-forwarded
+			<-transcribed
+			return nil
+		}
+	}
+	if err := recording.Stop(o.ctx); err != nil {
+		_, _ = recording.Release()
+		<-forwarded
+		<-transcribed
+		if o.machine.Result() != "" {
+			return nil
+		}
+		if errs.Classify(err) == errs.NoSpeech {
+			_ = o.machine.ApplyTerminal(NoSpeechCommand, o.currentProvider(), errs.NoSpeech)
+			return nil
+		}
+		return o.fail(err)
+	}
+	if err := o.machine.Apply(CaptureStoppedCommand); err != nil {
+		_, _ = recording.Release()
+		<-forwarded
+		<-transcribed
+		if o.machine.Result() != "" {
+			return nil
+		}
+		return o.fail(err)
+	}
+	<-forwarded
+	outcome := <-transcribed
+	_, cleanupErr := recording.Release()
+	if outcome.err != nil {
+		outcome.err = errors.Join(outcome.err, cleanupErr)
+	} else if cleanupErr != nil {
+		outcome.result.Warnings = append(outcome.result.Warnings, stt.Warning{
+			Class: errs.AudioFailed, Provider: outcome.result.Provider, Component: "audio", Message: "nettoyage audio dégradé",
+		})
+	}
+	provider := outcome.result.Provider
+	if provider == "" && len(outcome.result.Segments) > 0 {
+		provider = outcome.result.Segments[len(outcome.result.Segments)-1].Provider
+	}
+	if outcome.err == nil {
+		o.publish(events.ProviderSelected, provider, "", "", 0, 0)
+	}
+	return o.completeTranscript(outcome.result.Text, provider, outcome.result.Warnings, outcome.err)
+}
+
+func (o *Orchestrator) completeTranscript(transcript, provider string, warnings []stt.Warning, err error) error {
+	if err != nil {
+		provider = stt.ProviderFromError(err)
+		o.setProvider(provider)
+		if o.machine.Result() != "" {
+			return nil
+		}
+		if errs.Classify(err) == errs.EmptyResponse || errs.Classify(err) == errs.NoSpeech {
+			_ = o.machine.ApplyTerminal(NoSpeechCommand, provider, errs.NoSpeech)
+			return nil
+		}
+		return o.fail(err)
+	}
+	o.setProvider(provider)
+	for _, warning := range warnings {
+		o.addWarning(warning.Message)
+		o.publish(events.Degraded, warning.Provider, warning.Class, warning.Component, 0, 0)
+	}
+	if err := o.machine.Apply(TranscriptionDoneCommand); err != nil {
+		if o.machine.Result() != "" {
+			return nil
+		}
+		return o.fail(err)
+	}
+	if raw, ok := o.sink.(interface {
+		CopyRaw(context.Context, string) error
+	}); ok {
+		if err := raw.CopyRaw(o.ctx, transcript); err != nil {
+			return o.fail(err)
+		}
+	}
+
+	processed, err := o.processor.Run(o.ctx, transcript)
+	if err != nil {
+		if o.machine.Result() != "" {
+			return nil
+		}
+		return o.fail(err)
+	}
+	for _, warning := range processed.Warnings {
+		o.addWarning(warning.Stage + ": " + warning.Message)
+		o.publish(events.Degraded, provider, errs.Internal, warning.Stage, 0, 0)
+	}
+	if strings.TrimSpace(processed.Text) == "" {
+		_ = o.machine.ApplyTerminal(NoSpeechCommand, provider, errs.NoSpeech)
+		return nil
+	}
+	if err := o.machine.Apply(ProcessingDoneCommand); err != nil {
+		if o.machine.Result() != "" {
+			return nil
+		}
+		return o.fail(err)
+	}
+	if err := o.sink.Deliver(o.ctx, processed.Text); err != nil {
+		return o.fail(err)
+	}
+	o.publish(events.Delivered, provider, "", "", 0, 0)
+	if err := o.machine.ApplyTerminal(DeliveryDoneCommand, provider, ""); err != nil {
+		return o.fail(err)
+	}
+	return nil
+}
+
+func (o *Orchestrator) transcribe(file audio.WavFile) (string, string, []stt.Warning, error) {
+	segments, err := audio.Chunk(file.File, audio.ChunkOptions{
+		Duration: o.chunk, MinTail: time.Second, OutputDir: filepath.Dir(file.Path()),
+	})
+	if err != nil {
+		_, cleanupErr := file.Release()
+		return "", "", nil, errors.Join(err, cleanupErr)
+	}
+	requests := make([]stt.Segment, len(segments))
+	for i, segment := range segments {
+		requests[i] = stt.Segment{Index: segment.Index, Request: stt.Request{
+			Audio: segment.File, Filename: filepath.Base(segment.File.Path()),
+		}}
+		o.publish(events.PartialStarted, "", "", "", i+1, len(segments))
+	}
+	result, err := o.transcriber.TranscribeSegments(o.ctx, requests)
+	segmentErr := audio.RemoveSegments(segments)
+	_, releaseErr := file.Release()
+	cleanupErr := errors.Join(segmentErr, releaseErr)
+	if err != nil {
+		o.publish(events.PartialFailed, stt.ProviderFromError(err), errs.Classify(err), "stt", 0, len(segments))
+		return "", "", nil, errors.Join(err, cleanupErr)
+	}
+	for i, segment := range result.Segments {
+		o.publish(events.PartialDone, segment.Provider, "", "", i+1, len(segments))
+	}
+	provider := result.Provider
+	if provider == "" && len(result.Segments) > 0 {
+		provider = result.Segments[len(result.Segments)-1].Provider
+	}
+	o.publish(events.ProviderSelected, provider, "", "", 0, 0)
+	warnings := append([]stt.Warning(nil), result.Warnings...)
+	if cleanupErr != nil {
+		warnings = append(warnings, stt.Warning{Class: errs.AudioFailed, Provider: provider, Component: "audio", Message: "nettoyage audio dégradé"})
+	}
+	return result.Text, provider, warnings, nil
+}
+
+func (o *Orchestrator) Handle(_ context.Context, request ipc.Request) ipc.Response {
+	switch request.Command {
+	case ipc.Status:
+		return ipc.Success(string(o.machine.State()))
+	case ipc.Stop:
+		if err := o.machine.Apply(StopCommand); err != nil {
+			return ipc.Failure(err)
+		}
+		o.stopOnce.Do(func() { o.stop <- struct{}{} })
+		return ipc.Success(string(o.machine.State()))
+	case ipc.Cancel:
+		if err := o.cancel(); err != nil {
+			return ipc.Failure(err)
+		}
+		return ipc.Success(string(o.machine.State()))
+	case ipc.Toggle:
+		if err := o.machine.Apply(ToggleCommand); err != nil {
+			return ipc.Failure(err)
+		}
+		o.stopOnce.Do(func() { o.stop <- struct{}{} })
+		return ipc.Success(string(o.machine.State()))
+	default:
+		return ipc.Failure(errs.New(errs.ConfigInvalid, "session", "commande IPC non gérée"))
+	}
+}
+
+func (o *Orchestrator) cancel() error {
+	switch o.machine.Result() {
+	case Cancelled:
+		return nil
+	case Completed, NoSpeech, Failed:
+		return errs.New(errs.Unavailable, "session", "annulation refusée: la session est déjà terminée")
+	}
+	if err := o.machine.ApplyTerminal(CancelCommand, o.currentProvider(), errs.Cancelled); err != nil {
+		return err
+	}
+	o.cancelOps()
+	return nil
+}
+
+func (o *Orchestrator) fail(err error) error {
+	if o.machine.Result() != "" {
+		return nil
+	}
+	if provider := stt.ProviderFromError(err); provider != "" {
+		o.setProvider(provider)
+	}
+	if applyErr := o.machine.ApplyTerminal(FailCommand, o.currentProvider(), errs.Classify(err)); applyErr != nil {
+		return errors.Join(err, applyErr)
+	}
+	return err
+}
+
+func audioRecordingFailure(err error) error {
+	if errs.Classify(err) == errs.AudioFailed {
+		return err
+	}
+	if err == nil {
+		return errs.New(errs.AudioFailed, "audio", "capture audio interrompue")
+	}
+	return errs.Wrap(errs.AudioFailed, "audio", "capture audio interrompue", err)
+}
+
+func (o *Orchestrator) finalResult(runErr error) LastResult {
+	provider, warnings := o.metadata()
+	result := o.machine.Result()
+	if result == "" {
+		result = Failed
+		_ = o.machine.ApplyTerminal(FailCommand, provider, errs.Classify(runErr))
+	}
+	last := LastResult{
+		Version: 1, SessionID: o.machine.sessionID, Result: result,
+		StartedAt: o.startedAt, FinishedAt: o.now().UTC(),
+		Provider: provider, Warnings: warnings,
+	}
+	if result == Failed && runErr != nil {
+		last.Error = resultError(runErr)
+	}
+	return last
+}
+
+func (o *Orchestrator) setProvider(provider string) {
+	o.metadataMu.Lock()
+	o.runResult.Provider = provider
+	o.metadataMu.Unlock()
+}
+
+func (o *Orchestrator) currentProvider() string {
+	o.metadataMu.Lock()
+	defer o.metadataMu.Unlock()
+	return o.runResult.Provider
+}
+
+func (o *Orchestrator) addWarning(warning string) {
+	o.metadataMu.Lock()
+	o.runResult.Warnings = append(o.runResult.Warnings, warning)
+	o.metadataMu.Unlock()
+}
+
+func (o *Orchestrator) metadata() (string, []string) {
+	o.metadataMu.Lock()
+	defer o.metadataMu.Unlock()
+	return o.runResult.Provider, append([]string(nil), o.runResult.Warnings...)
+}
+
+func resultError(err error) *ResultError {
+	result := &ResultError{Class: errs.Classify(err), Message: "échec de la session"}
+	var typed *errs.Error
+	if errors.As(err, &typed) {
+		result.Component = typed.Component
+		result.Message = typed.Msg
+	}
+	return result
+}
+
+func (o *Orchestrator) publish(kind events.Type, provider string, class errs.Class, component string, partial, total int) {
+	eventPublisher{bus: o.bus, ui: o.ui}.Publish(events.Event{
+		Version: 1, Type: kind, Timestamp: o.now().UTC(), SessionID: o.machine.sessionID,
+		State: string(o.machine.State()), Provider: provider, ErrorClass: class,
+		Component: component, Partial: partial, Total: total,
+	})
+}
+
+func (o *Orchestrator) String() string {
+	return fmt.Sprintf("session %s (%s)", o.machine.sessionID, o.machine.State())
+}
+
+var _ ipc.Handler = (*Orchestrator)(nil)

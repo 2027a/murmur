@@ -1,0 +1,25 @@
+{
+  "language": "en",
+  "quotes": {
+    "open": "“",
+    "close": "”"
+  },
+  "variants": {
+    "open_quote": [
+      "open quote",
+      "open quotes",
+      "open quotation marks"
+    ],
+    "close_quote": [
+      "close quote",
+      "close quotes",
+      "close quotation marks"
+    ],
+    "line_break": [
+      "new line"
+    ],
+    "paragraph_break": [
+      "new paragraph"
+    ]
+  }
+}

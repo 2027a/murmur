@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://git.2027a.net/mathieu/murmur/schemas/cli-result-v1.json",
+  "title": "Murmur composable CLI result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "command",
+    "success",
+    "provider",
+    "model",
+    "language",
+    "transcript_raw",
+    "transcript_final",
+    "segment_count",
+    "segments",
+    "warnings",
+    "error"
+  ],
+  "properties": {
+    "v": { "type": "integer", "const": 1 },
+    "command": { "type": "string", "enum": ["transcribe", "cleanup", "dictate"] },
+    "success": { "type": "boolean" },
+    "provider": { "type": "string" },
+    "model": { "type": "string" },
+    "language": { "type": "string" },
+    "transcript_raw": { "type": "string" },
+    "transcript_final": { "type": "string" },
+    "segment_count": { "type": "integer", "minimum": 0 },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "provider", "model", "language", "transcript"],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "provider": { "type": "string" },
+          "model": { "type": "string" },
+          "language": { "type": "string" },
+          "transcript": { "type": "string" }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["class", "provider", "component", "message"],
+        "properties": {
+          "class": { "$ref": "#/$defs/optionalErrorClass" },
+          "provider": { "type": "string" },
+          "component": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      }
+    },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["class", "component", "message"],
+          "properties": {
+            "class": { "$ref": "#/$defs/errorClass" },
+            "component": { "type": "string" },
+            "message": { "type": "string" }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "errorClass": {
+      "type": "string",
+      "enum": [
+        "config_invalid",
+        "policy_blocked",
+        "audio_failed",
+        "unavailable",
+        "auth_failed",
+        "timeout",
+        "empty_response",
+        "server_error",
+        "no_speech",
+        "sink_failed",
+        "cancelled",
+        "internal"
+      ]
+    },
+    "optionalErrorClass": {
+      "type": "string",
+      "enum": [
+        "",
+        "config_invalid",
+        "policy_blocked",
+        "audio_failed",
+        "unavailable",
+        "auth_failed",
+        "timeout",
+        "empty_response",
+        "server_error",
+        "no_speech",
+        "sink_failed",
+        "cancelled",
+        "internal"
+      ]
+    }
+  }
+}

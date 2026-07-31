@@ -1,0 +1,8 @@
+/build/
+/dist/
+/murmur
+*.test
+*.out
+*.py[cod]
+__pycache__/
+.pytest_cache/
