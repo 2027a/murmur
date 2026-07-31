@@ -53,7 +53,7 @@ install: check-install-vars build
 	install -d "$(DESTDIR)$(BINDIR)"
 	install -m 0755 build/murmur "$(DESTDIR)$(BINDIR)/murmur"
 	install -d "$(DESTDIR)$(DOCDIR)/docs" "$(DESTDIR)$(DOCDIR)/examples"
-	install -m 0644 README.md "$(DESTDIR)$(DOCDIR)/README.md"
+	install -m 0644 README.md LICENSE "$(DESTDIR)$(DOCDIR)/"
 	install -m 0644 $(addprefix docs/,$(DOC_FILES)) "$(DESTDIR)$(DOCDIR)/docs/"
 	install -m 0644 $(addprefix examples/,$(EXAMPLE_FILES)) "$(DESTDIR)$(DOCDIR)/examples/"
 	@if [ "$(INSTALL_OSD)" = 1 ]; then \
@@ -61,8 +61,11 @@ install: check-install-vars build
 	fi
 
 uninstall: check-install-vars
-	rm -f "$(DESTDIR)$(BINDIR)/murmur" "$(DESTDIR)$(BINDIR)/murmur-osd"
-	rm -f "$(DESTDIR)$(DOCDIR)/README.md"
+	rm -f "$(DESTDIR)$(BINDIR)/murmur"
+	@if [ "$(INSTALL_OSD)" = 1 ]; then \
+		rm -f "$(DESTDIR)$(BINDIR)/murmur-osd"; \
+	fi
+	rm -f "$(DESTDIR)$(DOCDIR)/README.md" "$(DESTDIR)$(DOCDIR)/LICENSE"
 	@for file in $(DOC_FILES); do rm -f "$(DESTDIR)$(DOCDIR)/docs/$$file"; done
 	@for file in $(EXAMPLE_FILES); do rm -f "$(DESTDIR)$(DOCDIR)/examples/$$file"; done
 	@rmdir "$(DESTDIR)$(DOCDIR)/docs" "$(DESTDIR)$(DOCDIR)/examples" "$(DESTDIR)$(DOCDIR)" 2>/dev/null || true
@@ -70,15 +73,34 @@ uninstall: check-install-vars
 installcheck: build
 	@root="$$(mktemp -d)"; \
 	trap 'rm -rf "$$root"' EXIT HUP INT TERM; \
-	$(MAKE) --no-print-directory install DESTDIR="$$root" PREFIX=/usr INSTALL_OSD=1; \
-	test -x "$$root/usr/bin/murmur"; \
-	test -x "$$root/usr/bin/murmur-osd"; \
-	test -f "$$root/usr/share/doc/murmur/README.md"; \
-	test -f "$$root/usr/share/doc/murmur/docs/ipc.md"; \
-	test -f "$$root/usr/share/doc/murmur/docs/desktop-validation.md"; \
-	test -f "$$root/usr/share/doc/murmur/examples/config.minimal.toml"; \
-	(cd "$$root" && "$$root/usr/bin/murmur" help >/dev/null); \
-	$(MAKE) --no-print-directory uninstall DESTDIR="$$root" PREFIX=/usr; \
-	test ! -e "$$root/usr/bin/murmur"; \
-	test ! -e "$$root/usr/bin/murmur-osd"; \
-	test ! -e "$$root/usr/share/doc/murmur/README.md"
+	install -d "$$root/without-osd/usr/bin" "$$root/without-osd/usr/share/doc/murmur"; \
+	printf '%s\n' sentinel >"$$root/without-osd/usr/bin/murmur-osd"; \
+	printf '%s\n' foreign >"$$root/without-osd/usr/bin/foreign-tool"; \
+	printf '%s\n' foreign >"$$root/without-osd/usr/share/doc/murmur/foreign-document"; \
+	$(MAKE) --no-print-directory install DESTDIR="$$root/without-osd" PREFIX=/usr INSTALL_OSD=0; \
+	test -x "$$root/without-osd/usr/bin/murmur"; \
+	test -f "$$root/without-osd/usr/share/doc/murmur/README.md"; \
+	test -f "$$root/without-osd/usr/share/doc/murmur/LICENSE"; \
+	$(MAKE) --no-print-directory uninstall DESTDIR="$$root/without-osd" PREFIX=/usr INSTALL_OSD=0; \
+	test ! -e "$$root/without-osd/usr/bin/murmur"; \
+	test -f "$$root/without-osd/usr/bin/murmur-osd"; \
+	test -f "$$root/without-osd/usr/bin/foreign-tool"; \
+	test ! -e "$$root/without-osd/usr/share/doc/murmur/LICENSE"; \
+	test -f "$$root/without-osd/usr/share/doc/murmur/foreign-document"; \
+	install -d "$$root/with-osd/usr/bin"; \
+	printf '%s\n' foreign >"$$root/with-osd/usr/bin/foreign-tool"; \
+	$(MAKE) --no-print-directory install DESTDIR="$$root/with-osd" PREFIX=/usr INSTALL_OSD=1; \
+	test -x "$$root/with-osd/usr/bin/murmur"; \
+	test -x "$$root/with-osd/usr/bin/murmur-osd"; \
+	test -f "$$root/with-osd/usr/share/doc/murmur/README.md"; \
+	test -f "$$root/with-osd/usr/share/doc/murmur/LICENSE"; \
+	test -f "$$root/with-osd/usr/share/doc/murmur/docs/ipc.md"; \
+	test -f "$$root/with-osd/usr/share/doc/murmur/docs/desktop-validation.md"; \
+	test -f "$$root/with-osd/usr/share/doc/murmur/examples/config.minimal.toml"; \
+	(cd "$$root/with-osd" && "$$root/with-osd/usr/bin/murmur" help >/dev/null); \
+	$(MAKE) --no-print-directory uninstall DESTDIR="$$root/with-osd" PREFIX=/usr INSTALL_OSD=1; \
+	test ! -e "$$root/with-osd/usr/bin/murmur"; \
+	test ! -e "$$root/with-osd/usr/bin/murmur-osd"; \
+	test -f "$$root/with-osd/usr/bin/foreign-tool"; \
+	test ! -e "$$root/with-osd/usr/share/doc/murmur/README.md"; \
+	test ! -e "$$root/with-osd/usr/share/doc/murmur/LICENSE"
