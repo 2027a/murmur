@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "command": "transcribe",
+  "success": true,
+  "provider": "mixed",
+  "model": "incorrect",
+  "language": "fr",
+  "transcript_raw": "un deux",
+  "transcript_final": "un deux",
+  "segment_count": 2,
+  "segments": [
+    {"index": 0, "provider": "a", "model": "a", "language": "fr", "transcript": "un"},
+    {"index": 1, "provider": "b", "model": "b", "language": "fr", "transcript": "deux"}
+  ],
+  "warnings": [],
+  "error": null
+}

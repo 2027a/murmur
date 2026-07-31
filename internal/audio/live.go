@@ -57,6 +57,7 @@ type GrowingSegmenter struct {
 	minimumTail    int64
 	cursor         int64
 	pending        *wav.File
+	files          []wav.File
 	nextIndex      int
 }
 
@@ -79,12 +80,14 @@ func (s *GrowingSegmenter) Poll() ([]LiveSegment, error) {
 	if err != nil || !ok {
 		return nil, err
 	}
+	defer snapshot.Close()
 	var emitted []LiveSegment
 	for snapshot.Samples()-s.cursor >= s.segmentSamples {
 		part, err := snapshot.Slice(s.outputDir, s.cursor, s.segmentSamples)
 		if err != nil {
 			return nil, err
 		}
+		s.files = append(s.files, part)
 		s.cursor += s.segmentSamples
 		if s.pending != nil {
 			emitted = append(emitted, s.segment(*s.pending))
@@ -104,6 +107,7 @@ func (s *GrowingSegmenter) Finalize(final wav.File) ([]LiveSegment, error) {
 		if err != nil {
 			return nil, err
 		}
+		s.files = append(s.files, part)
 		s.cursor += s.segmentSamples
 		if s.pending != nil {
 			emitted = append(emitted, s.segment(*s.pending))
@@ -116,6 +120,7 @@ func (s *GrowingSegmenter) Finalize(final wav.File) ([]LiveSegment, error) {
 		if err != nil {
 			return nil, err
 		}
+		s.files = append(s.files, part)
 		tail = &part
 	}
 	if s.pending != nil && tail != nil && tail.Samples() < s.minimumTail {
@@ -123,6 +128,7 @@ func (s *GrowingSegmenter) Finalize(final wav.File) ([]LiveSegment, error) {
 		if err != nil {
 			return nil, err
 		}
+		s.files = append(s.files, merged)
 		emitted = append(emitted, s.segment(merged))
 		return emitted, nil
 	}
@@ -133,6 +139,15 @@ func (s *GrowingSegmenter) Finalize(final wav.File) ([]LiveSegment, error) {
 		emitted = append(emitted, s.segment(*tail))
 	}
 	return emitted, nil
+}
+
+func (s *GrowingSegmenter) Close() error {
+	var result error
+	for _, file := range s.files {
+		result = errors.Join(result, file.Close())
+	}
+	s.files = nil
+	return result
 }
 
 func (s *GrowingSegmenter) segment(file wav.File) LiveSegment {
@@ -161,12 +176,13 @@ func (f *FakeRecorder) StartLive(ctx context.Context, opts RecordOptions, live L
 	}
 	reader, handle, err := source.OpenData()
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, source.Close())
 	}
 	data, readErr := io.ReadAll(reader)
 	closeErr := handle.Close()
-	if readErr != nil || closeErr != nil {
-		return nil, errors.Join(readErr, closeErr)
+	sourceCloseErr := source.Close()
+	if readErr != nil || closeErr != nil || sourceCloseErr != nil {
+		return nil, errors.Join(readErr, closeErr, sourceCloseErr)
 	}
 	tempDir, err := os.MkdirTemp(opts.Directory, "murmur-audio-live-")
 	if err != nil {
@@ -196,7 +212,7 @@ func (f *FakeRecorder) StartLive(ctx context.Context, opts RecordOptions, live L
 		stepBytes: stepSamples * wav.BlockAlign, interval: interval, segmenter: segmenter,
 		ctx: liveCtx, cancel: cancel, ready: make(chan error, 1),
 		segments: make(chan LiveSegment, 2), errors: make(chan error, 1),
-		stop: make(chan fakeStopRequest), done: make(chan struct{}),
+		stop: make(chan fakeStopRequest), stopping: make(chan struct{}), done: make(chan struct{}),
 		failure: f.DoneGate, failureErr: f.DoneErr,
 	}
 	go r.run(f.ReadyGate, f.ReadyErr)
@@ -204,8 +220,8 @@ func (f *FakeRecorder) StartLive(ctx context.Context, opts RecordOptions, live L
 }
 
 type fakeStopRequest struct {
-	ctx    context.Context
-	result chan error
+	file wav.File
+	err  error
 }
 
 type fakeLiveRecording struct {
@@ -223,15 +239,18 @@ type fakeLiveRecording struct {
 	segments   chan LiveSegment
 	errors     chan error
 	stop       chan fakeStopRequest
+	stopping   chan struct{}
 	done       chan struct{}
 	failure    <-chan struct{}
 	failureErr error
 
-	mu       sync.Mutex
-	runErr   error
-	cleanup  sync.Once
-	release  string
-	cleanErr error
+	mu        sync.Mutex
+	runErr    error
+	stopOnce  sync.Once
+	captureMu sync.Mutex
+	cleanup   sync.Once
+	release   string
+	cleanErr  error
 }
 
 func (r *fakeLiveRecording) Ready() <-chan error          { return r.ready }
@@ -248,6 +267,11 @@ func (r *fakeLiveRecording) run(gate <-chan struct{}, readyErr error) {
 	if gate != nil {
 		select {
 		case <-gate:
+		case result := <-r.stop:
+			err := r.finalize(result)
+			r.publishReady(err)
+			r.finish(err)
+			return
 		case <-r.failure:
 			err := fakeRecordingFailure(r.failureErr)
 			r.publishReady(err)
@@ -280,10 +304,8 @@ func (r *fakeLiveRecording) run(gate <-chan struct{}, readyErr error) {
 		case <-r.ctx.Done():
 			r.finish(r.ctx.Err())
 			return
-		case request := <-r.stop:
-			err := r.finalize(request.ctx)
-			r.finish(err)
-			request.result <- err
+		case result := <-r.stop:
+			r.finish(r.finalize(result))
 			return
 		case <-ticker.C:
 			if err := r.appendStep(); err != nil {
@@ -299,6 +321,15 @@ func (r *fakeLiveRecording) run(gate <-chan struct{}, readyErr error) {
 }
 
 func (r *fakeLiveRecording) appendStep() error {
+	r.captureMu.Lock()
+	defer r.captureMu.Unlock()
+	if r.stopRequested() {
+		return nil
+	}
+	return r.appendStepLocked()
+}
+
+func (r *fakeLiveRecording) appendStepLocked() error {
 	if r.written >= int64(len(r.data)) {
 		return nil
 	}
@@ -321,27 +352,15 @@ func (r *fakeLiveRecording) poll() error {
 	return r.emit(segments)
 }
 
-func (r *fakeLiveRecording) finalize(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func (r *fakeLiveRecording) finalize(result fakeStopRequest) error {
+	if result.err != nil {
+		return result.err
 	}
-	if r.written < int64(len(r.data)) {
-		if err := wav.AppendPCM(r.path, r.data[r.written:]); err != nil {
-			return err
-		}
-		r.written = int64(len(r.data))
-	}
+	defer result.file.Close()
 	if err := r.poll(); err != nil {
 		return err
 	}
-	final, err := wav.FinalizeGrowing(r.path)
-	if err != nil {
-		return err
-	}
-	if final.Duration() < r.opts.MinimumDuration {
-		return errs.New(errs.NoSpeech, "audio/fake", "capture audio vide")
-	}
-	segments, err := r.segmenter.Finalize(final)
+	segments, err := r.segmenter.Finalize(result.file)
 	if err != nil {
 		return err
 	}
@@ -376,28 +395,73 @@ func (r *fakeLiveRecording) finish(err error) {
 }
 
 func (r *fakeLiveRecording) Stop(ctx context.Context) error {
-	request := fakeStopRequest{ctx: ctx, result: make(chan error, 1)}
 	select {
-	case r.stop <- request:
+	case <-r.done:
+		return r.result()
+	default:
+	}
+	owner := false
+	r.stopOnce.Do(func() {
+		owner = true
+		close(r.stopping)
+		go func() {
+			file, err := r.stopCapture(ctx)
+			result := fakeStopRequest{file: file, err: err}
+			select {
+			case r.stop <- result:
+			case <-r.done:
+				_ = file.Close()
+			}
+		}()
+	})
+	select {
 	case <-r.done:
 		return r.result()
 	case <-ctx.Done():
-		return ctx.Err()
-	}
-	select {
-	case err := <-request.result:
-		return err
-	case <-ctx.Done():
+		if !owner {
+			return ctx.Err()
+		}
 		r.cancel()
 		<-r.done
 		return ctx.Err()
 	}
 }
 
+func (r *fakeLiveRecording) stopCapture(ctx context.Context) (wav.File, error) {
+	if err := ctx.Err(); err != nil {
+		return wav.File{}, err
+	}
+	r.captureMu.Lock()
+	defer r.captureMu.Unlock()
+	if r.written < int64(len(r.data)) {
+		if err := wav.AppendPCM(r.path, r.data[r.written:]); err != nil {
+			return wav.File{}, err
+		}
+		r.written = int64(len(r.data))
+	}
+	final, err := wav.FinalizeGrowing(r.path)
+	if err != nil {
+		return wav.File{}, err
+	}
+	if final.Duration() < r.opts.MinimumDuration {
+		return wav.File{}, errors.Join(errs.New(errs.NoSpeech, "audio/fake", "capture audio vide"), final.Close())
+	}
+	return final, nil
+}
+
+func (r *fakeLiveRecording) stopRequested() bool {
+	select {
+	case <-r.stopping:
+		return true
+	default:
+		return false
+	}
+}
+
 func (r *fakeLiveRecording) Abort() error {
 	r.cancel()
 	<-r.done
-	r.cleanup.Do(func() { r.cleanErr = os.RemoveAll(r.tempDir) })
+	r.cleanup.Do(func() { r.cleanErr = errors.Join(r.segmenter.Close(), os.RemoveAll(r.tempDir)) })
 	if err := r.result(); err != nil && !errors.Is(err, context.Canceled) {
 		return errors.Join(err, r.cleanErr)
 	}
@@ -406,7 +470,9 @@ func (r *fakeLiveRecording) Abort() error {
 
 func (r *fakeLiveRecording) Release() (string, error) {
 	r.cleanup.Do(func() {
+		segmentErr := r.segmenter.Close()
 		r.release, r.cleanErr = preserveOrRemove(r.path, r.tempDir, r.opts.Retention)
+		r.cleanErr = errors.Join(segmentErr, r.cleanErr)
 	})
 	return r.release, r.cleanErr
 }

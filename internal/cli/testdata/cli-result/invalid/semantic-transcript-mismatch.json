@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "command": "transcribe",
+  "success": true,
+  "provider": "local",
+  "model": "large-v3",
+  "language": "fr",
+  "transcript_raw": "texte différent",
+  "transcript_final": "texte différent",
+  "segment_count": 1,
+  "segments": [
+    {"index": 0, "provider": "local", "model": "large-v3", "language": "fr", "transcript": "segment"}
+  ],
+  "warnings": [],
+  "error": null
+}

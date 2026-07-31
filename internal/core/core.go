@@ -26,14 +26,14 @@ type BuildOptions struct {
 }
 
 func BuildTranscriber(ctx context.Context, cfg config.Config, options BuildOptions) (*stt.Chain, error) {
-	if err := config.ValidateActiveProviderPolicy(cfg); err != nil {
+	if err := config.Validate(cfg); err != nil {
 		return nil, err
 	}
 	trusted, err := trustedNetworks(cfg.Policy.TrustedNetworks)
 	if err != nil {
 		return nil, err
 	}
-	resolver := secretResolver(options.Executor)
+	resolver := secretResolver(cfg, options.Executor)
 	building(options, cfg.STT.Provider)
 	primary, err := buildSTT(ctx, cfg.STT.Provider, cfg.STT.Providers[cfg.STT.Provider], trusted, resolver)
 	if err != nil {
@@ -51,15 +51,17 @@ func BuildTranscriber(ctx context.Context, cfg config.Config, options BuildOptio
 		AllowMixedProviders: cfg.STT.AllowMixedProviders,
 		AllowPartial:        cfg.STT.AllowPartial,
 		Workers:             cfg.STT.ChunkWorkers,
+		MaxTextBytes:        cfg.STT.MaxTextBytes,
+		MaxSegments:         cfg.STT.MaxSegments,
 	})
 }
 
 func BuildCleanup(ctx context.Context, cfg config.Config, options BuildOptions) (*cleanup.Client, error) {
+	if err := config.Validate(cfg); err != nil {
+		return nil, err
+	}
 	if !cfg.Cleanup.Enabled {
 		return nil, nil
-	}
-	if err := config.ValidateActiveProviderPolicy(cfg); err != nil {
-		return nil, err
 	}
 	trusted, err := trustedNetworks(cfg.Policy.TrustedNetworks)
 	if err != nil {
@@ -67,7 +69,7 @@ func BuildCleanup(ctx context.Context, cfg config.Config, options BuildOptions) 
 	}
 	building(options, cfg.Cleanup.Provider)
 	provider := cfg.Cleanup.Providers[cfg.Cleanup.Provider]
-	secret, err := secretResolver(options.Executor).ResolveCleanup(ctx, provider)
+	secret, err := secretResolver(cfg, options.Executor).ResolveCleanup(ctx, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +110,9 @@ func BuildProcessor(ctx context.Context, cfg config.Config, options BuildOptions
 }
 
 func BuildPlugin(cfg config.Config) (textpipe.Plugin, error) {
+	if err := config.Validate(cfg); err != nil {
+		return nil, err
+	}
 	if !cfg.Plugin.Enabled {
 		return nil, nil
 	}
@@ -157,6 +162,7 @@ func NewSTTProvider(name string, provider config.ProviderConfig, secret string, 
 		Name: name, BaseURL: provider.BaseURL, Model: provider.Model, Language: provider.Language,
 		Prompt: provider.Prompt, APIKey: secret, Timeout: time.Duration(provider.TimeoutS) * time.Second,
 		AllowedZone: zone, TrustedNetworks: trusted,
+		AllowInsecure: provider.AllowInsecure,
 		HealthEnabled: provider.HealthEnabled, HealthEndpoint: provider.HealthEndpoint,
 		Retries: provider.Retries, RetryBackoff: time.Duration(provider.RetryBackoffMS) * time.Millisecond,
 	})
@@ -174,9 +180,9 @@ func trustedNetworks(values []string) ([]netip.Prefix, error) {
 	return result, nil
 }
 
-func secretResolver(executor sysexec.Executor) config.SecretResolver {
+func secretResolver(cfg config.Config, executor sysexec.Executor) config.SecretResolver {
 	if executor == nil {
-		executor = sysexec.OSExecutor{Env: os.Environ()}
+		executor = sysexec.OSExecutor{Env: config.CredentialHelperEnvironment(cfg, os.Environ())}
 	}
 	return config.SecretResolver{Runner: commandRunner{executor: executor}}
 }

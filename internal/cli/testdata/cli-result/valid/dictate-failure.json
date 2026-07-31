@@ -1,0 +1,26 @@
+{
+  "v": 1,
+  "command": "dictate",
+  "success": false,
+  "provider": "local",
+  "model": "large-v3",
+  "language": "fr",
+  "transcript_raw": "silence",
+  "transcript_final": "",
+  "segment_count": 1,
+  "segments": [
+    {
+      "index": 0,
+      "provider": "local",
+      "model": "large-v3",
+      "language": "fr",
+      "transcript": "silence"
+    }
+  ],
+  "warnings": [],
+  "error": {
+    "class": "no_speech",
+    "component": "text-pipeline",
+    "message": "le pipeline n'a produit aucun texte"
+  }
+}

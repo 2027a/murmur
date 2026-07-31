@@ -186,9 +186,13 @@ func (r *recording) publishReady(err error) {
 }
 
 func (r *recording) Stop(ctx context.Context) (audio.WavFile, error) {
-	owner, _ := r.begin(actionStopping, nil)
+	owner, _, endedErr := r.begin(actionStopping, nil)
 	if !owner {
 		return r.waitFinished(ctx, r.stopGrace+r.killWait)
+	}
+	if endedErr != nil {
+		r.complete(audio.WavFile{}, endedErr, true)
+		return r.result, r.resultErr
 	}
 
 	graceful, err := r.terminate(ctx, r.stopGrace)
@@ -218,7 +222,7 @@ func (r *recording) Stop(ctx context.Context) (audio.WavFile, error) {
 		return r.result, r.resultErr
 	}
 	if file.Duration() < r.opts.MinimumDuration {
-		r.complete(audio.WavFile{}, errs.New(errs.NoSpeech, "audio/pw-record", "capture audio vide"), true)
+		r.complete(audio.WavFile{}, errors.Join(errs.New(errs.NoSpeech, "audio/pw-record", "capture audio vide"), file.Close()), true)
 		return r.result, r.resultErr
 	}
 	r.complete(audio.NewWavFile(file, r.tempDir, r.opts.Retention), nil, false)
@@ -228,7 +232,7 @@ func (r *recording) Stop(ctx context.Context) (audio.WavFile, error) {
 func (r *recording) Abort() error { return r.abort(nil) }
 
 func (r *recording) abort(cause error) error {
-	owner, current := r.begin(actionAborting, cause)
+	owner, current, endedErr := r.begin(actionAborting, cause)
 	if !owner {
 		if current == actionStopping {
 			r.mu.Lock()
@@ -242,6 +246,14 @@ func (r *recording) abort(cause error) error {
 		case <-time.After(r.stopGrace + r.killWait):
 			return errs.New(errs.Timeout, "audio/pw-record", "arrêt de pw-record non confirmé")
 		}
+	}
+	if endedErr != nil {
+		cleanupErr := os.RemoveAll(r.tempDir)
+		if cleanupErr != nil {
+			cleanupErr = errs.Wrap(errs.AudioFailed, "audio/pw-record", "impossible de supprimer la capture annulée", cleanupErr)
+		}
+		r.complete(audio.WavFile{}, errors.Join(endedErr, cleanupErr), false)
+		return r.resultErr
 	}
 	_, stopErr := r.terminate(context.Background(), r.abortGrace)
 	cleanupErr := os.RemoveAll(r.tempDir)
@@ -292,15 +304,16 @@ func (r *recording) terminate(ctx context.Context, grace time.Duration) (bool, e
 	return false, nil
 }
 
-func (r *recording) begin(next action, cause error) (bool, action) {
+func (r *recording) begin(next action, cause error) (bool, action, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.action != actionNone {
-		return false, r.action
+		return false, r.action, nil
 	}
+	endedErr := r.doneErr
 	r.action = next
 	r.abortCause = cause
-	return true, next
+	return true, next, endedErr
 }
 
 func (r *recording) cancellationCause() error {

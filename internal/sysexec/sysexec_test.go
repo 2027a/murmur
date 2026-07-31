@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -104,18 +107,44 @@ func TestOSExecutorCancellationKillsProcessGroup(t *testing.T) {
 }
 
 func TestOSExecutorRunCancellationKillsHelperGroup(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	pidFile := filepath.Join(t.TempDir(), "descendant.pid")
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := (OSExecutor{}).Run(ctx, "sh", []string{"-c", "sleep 30 & wait"}, nil)
+		_, err := (OSExecutor{}).Run(ctx, "sh", []string{"-c", "sleep 30 & child=$!; tmp=$1.tmp.$$; printf '%s' \"$child\" > \"$tmp\"; /bin/mv \"$tmp\" \"$1\"; wait", "sh", pidFile}, nil)
 		done <- err
 	}()
+	var descendantPID int
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(pidFile)
+		if err == nil {
+			descendantPID, err = strconv.Atoi(string(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if descendantPID == 0 {
+		t.Fatal("le descendant n'a pas démarré")
+	}
+	cancel()
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("le helper et son groupe ont survécu à l'annulation")
 	}
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(descendantPID, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("le descendant %d a survécu à l'annulation", descendantPID)
 }
 
 func TestOSExecutorStartRejectsCancelledContext(t *testing.T) {

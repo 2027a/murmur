@@ -9,15 +9,19 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"git.2027a.net/mathieu/murmur/internal/audio"
+	"git.2027a.net/mathieu/murmur/internal/audio/pwrecord"
 	"git.2027a.net/mathieu/murmur/internal/audio/wav"
 	"git.2027a.net/mathieu/murmur/internal/errs"
 	"git.2027a.net/mathieu/murmur/internal/events"
 	"git.2027a.net/mathieu/murmur/internal/ipc"
+	"git.2027a.net/mathieu/murmur/internal/sink"
 	"git.2027a.net/mathieu/murmur/internal/stt"
+	"git.2027a.net/mathieu/murmur/internal/sysexec"
 	"git.2027a.net/mathieu/murmur/internal/textpipe"
 	"git.2027a.net/mathieu/murmur/internal/ui"
 )
@@ -30,7 +34,32 @@ type fakeTranscriber struct {
 	once    sync.Once
 }
 
-func (f *fakeTranscriber) TranscribeSegments(ctx context.Context, _ []stt.Segment) (stt.MultiResult, error) {
+type fixedTextProvider struct {
+	text string
+}
+
+func (p fixedTextProvider) Name() string { return "primary" }
+func (p fixedTextProvider) Transcribe(context.Context, stt.Request) (stt.Result, error) {
+	return stt.Result{Text: p.text}, nil
+}
+
+type intermediateFailureProvider struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *intermediateFailureProvider) Name() string { return "primary" }
+func (p *intermediateFailureProvider) Transcribe(context.Context, stt.Request) (stt.Result, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	if p.calls == 2 {
+		return stt.Result{}, errs.New(errs.ServerError, "fake", "down")
+	}
+	return stt.Result{Text: "ok"}, nil
+}
+
+func (f *fakeTranscriber) TranscribeSegments(ctx context.Context, _ []stt.Segment, _ stt.Progress) (stt.MultiResult, error) {
 	if f.started != nil {
 		f.once.Do(func() { close(f.started) })
 	}
@@ -49,7 +78,7 @@ func (f *fakeTranscriber) TranscribeStream(ctx context.Context, segments <-chan 
 		select {
 		case _, ok := <-segments:
 			if !ok {
-				return f.TranscribeSegments(ctx, nil)
+				return f.TranscribeSegments(ctx, nil, stt.Progress{})
 			}
 		case <-ctx.Done():
 			return stt.MultiResult{}, ctx.Err()
@@ -88,6 +117,49 @@ type fakeSink struct {
 	once    sync.Once
 }
 
+type observedRecorder struct {
+	audio.Recorder
+	started chan<- audio.Recording
+}
+
+func (r observedRecorder) Start(ctx context.Context, opts audio.RecordOptions) (audio.Recording, error) {
+	recording, err := r.Recorder.Start(ctx, opts)
+	if err == nil {
+		r.started <- recording
+	}
+	return recording, err
+}
+
+type blockingStateUI struct {
+	state   State
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (u *blockingStateUI) Show(event events.Event) {
+	if event.State != string(u.state) {
+		return
+	}
+	u.once.Do(func() {
+		close(u.entered)
+		<-u.release
+	})
+}
+
+func (*blockingStateUI) Close() {}
+
+type timedFailureSink struct {
+	active *atomic.Int32
+}
+
+func (s timedFailureSink) Deliver(context.Context, string) error {
+	s.active.Add(1)
+	defer s.active.Add(-1)
+	time.Sleep(20 * time.Millisecond)
+	return errs.New(errs.SinkFailed, "sink/test", "délai de livraison dépassé")
+}
+
 func (f *fakeSink) Deliver(ctx context.Context, _ string) error {
 	f.mu.Lock()
 	f.calls++
@@ -111,7 +183,7 @@ func (f *fakeSink) count() int {
 	return f.calls
 }
 
-func newTestOrchestrator(t *testing.T, ready <-chan struct{}, transcriber Transcriber, processor Processor, target *fakeSink) *Orchestrator {
+func newTestOrchestrator(t *testing.T, ready <-chan struct{}, transcriber Transcriber, processor Processor, target sink.Sink) *Orchestrator {
 	t.Helper()
 	if transcriber == nil {
 		transcriber = &fakeTranscriber{result: stt.MultiResult{
@@ -201,6 +273,92 @@ func TestAudioDeathAfterReadinessFailsAndPersists(t *testing.T) {
 				t.Fatalf("persisted=%#v error=%v", persisted, err)
 			}
 		})
+	}
+}
+
+func TestPendingStopAfterObservedAudioDeathNeverReachesSTT(t *testing.T) {
+	runtimeDir := t.TempDir()
+	fixture, err := os.ReadFile(sessionWAV(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := sysexec.NewFakeProcess()
+	var recordingPath string
+	executor := &sysexec.FakeExecutor{StartFunc: func(_ context.Context, _ string, args []string) (sysexec.Process, error) {
+		recordingPath = args[len(args)-1]
+		if err := wav.CreateGrowing(recordingPath); err != nil {
+			return nil, err
+		}
+		return process, nil
+	}}
+	started := make(chan audio.Recording, 1)
+	recorder := observedRecorder{Recorder: pwrecord.New(executor), started: started}
+	blocked := &blockingStateUI{state: Stopping, entered: make(chan struct{}), release: make(chan struct{})}
+	transcriptionStarted := make(chan struct{})
+	transcriber := &fakeTranscriber{
+		started: transcriptionStarted,
+		result: stt.MultiResult{
+			Text: "ne doit pas être produit", Provider: "primary",
+			Segments: []stt.SegmentResult{{Index: 0, Text: "ne doit pas être produit", Provider: "primary"}},
+		},
+	}
+	target := &fakeSink{}
+	o, err := NewOrchestrator(OrchestratorOptions{
+		Context: context.Background(), SessionID: "stop-audio-death-race", RuntimeDir: runtimeDir,
+		Recorder: recorder,
+		RecordOptions: audio.RecordOptions{
+			Directory: runtimeDir, ReadinessInterval: time.Millisecond, MinimumDuration: 100 * time.Millisecond,
+		},
+		Transcriber: transcriber, Processor: &fakeProcessor{result: textpipe.Result{Text: "final"}},
+		Sink: target, UI: blocked, Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Begin(); err != nil {
+		t.Fatal(err)
+	}
+	done := runOrchestrator(o)
+	var recording audio.Recording
+	select {
+	case recording = <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recorder non démarré")
+	}
+	if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Stop)); !response.OK || !o.machine.StopPending() {
+		t.Fatalf("stop response=%#v pending=%v", response, o.machine.StopPending())
+	}
+	readyPath := recordingPath + ".ready"
+	if err := os.WriteFile(readyPath, fixture, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(readyPath, recordingPath); err != nil {
+		t.Fatal(err)
+	}
+	await(t, blocked.entered)
+	process.Exit(errors.New("pw-record died"))
+	await(t, recording.Done())
+	if err := recording.Err(); errs.Classify(err) != errs.AudioFailed {
+		t.Fatalf("erreur observée avant Stop=%v", err)
+	}
+	if signals := process.Signals(); len(signals) != 0 {
+		t.Fatalf("signaux avant Stop=%v", signals)
+	}
+	close(blocked.release)
+	result := awaitResult(t, done)
+	if result.Result != Failed || result.Error == nil || result.Error.Class != errs.AudioFailed {
+		t.Fatalf("result=%#v", result)
+	}
+	select {
+	case <-transcriptionStarted:
+		t.Fatal("le WAV d'une mort spontanée a atteint le STT")
+	default:
+	}
+	if target.count() != 0 {
+		t.Fatalf("sink calls=%d", target.count())
+	}
+	if signals := process.Signals(); len(signals) != 0 {
+		t.Fatalf("signaux après Stop=%v", signals)
 	}
 }
 
@@ -319,6 +477,305 @@ func TestSinkFailurePersistsEffectiveProviderAndClass(t *testing.T) {
 	persisted, err := ReadLastResult(o.runtimeDir)
 	if err != nil || persisted.Error == nil || persisted.Error.Class != errs.SinkFailed {
 		t.Fatalf("persisted=%#v error=%v", persisted, err)
+	}
+}
+
+func TestPipelineWarningClassesReachEventsAndLastResult(t *testing.T) {
+	const canary = "MURMUR-SENSITIVE-SESSION-CANARY"
+	for _, class := range []errs.Class{errs.ServerError, errs.Timeout, errs.AuthFailed, errs.PolicyBlocked, errs.Unavailable} {
+		t.Run(string(class), func(t *testing.T) {
+			pipeline, err := textpipe.New(textpipe.Options{
+				CommandPack: "fr",
+				Cleanup: textpipe.CleanupFunc(func(context.Context, string, textpipe.Protection) (string, error) {
+					return "", errs.Wrap(class, "unsafe/"+canary, "unsafe "+canary, errors.New("cause "+canary))
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			o := newTestOrchestrator(t, nil, nil, pipeline, &fakeSink{})
+			stream, unsubscribe := o.bus.Subscribe(32)
+			defer unsubscribe()
+			done := runOrchestrator(o)
+			waitForState(t, o, Recording)
+			_ = o.Handle(context.Background(), ipc.NewRequest(ipc.Stop))
+			result := awaitResult(t, done)
+			if result.Result != Completed || len(result.Warnings) != 1 {
+				t.Fatalf("result=%#v", result)
+			}
+			warning := result.Warnings[0]
+			if warning.Class != class || warning.Provider != "primary" || warning.Component != "cleanup" {
+				t.Fatalf("warning=%#v", warning)
+			}
+			persisted, err := ReadLastResult(o.runtimeDir)
+			if err != nil || len(persisted.Warnings) != 1 || persisted.Warnings[0].Class != class {
+				t.Fatalf("persisted=%#v error=%v", persisted, err)
+			}
+			encoded, err := json.Marshal(persisted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), canary) {
+				t.Fatalf("sensitive pipeline error leaked in %s", encoded)
+			}
+			var degraded bool
+			for len(stream) > 0 {
+				event := <-stream
+				degraded = degraded || event.Type == events.Degraded && event.ErrorClass == class && event.Component == "cleanup"
+			}
+			if !degraded {
+				t.Fatalf("classified degraded event missing from %s", class)
+			}
+		})
+	}
+}
+
+func TestOrchestratorPreservesGlobalProviderWithoutSegmentInference(t *testing.T) {
+	for _, provider := range []string{stt.ProviderMixed, ""} {
+		name := provider
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			transcriber := &fakeTranscriber{result: stt.MultiResult{
+				Text: "one two", Provider: provider,
+				Segments: []stt.SegmentResult{
+					{Index: 0, Text: "one", Provider: "primary"},
+					{Index: 1, Text: "two", Provider: "fallback"},
+				},
+			}}
+			o := newTestOrchestrator(t, nil, transcriber, nil, &fakeSink{})
+			stream, unsubscribe := o.bus.Subscribe(32)
+			defer unsubscribe()
+			done := runOrchestrator(o)
+			waitForState(t, o, Recording)
+			_ = o.Handle(context.Background(), ipc.NewRequest(ipc.Stop))
+			result := awaitResult(t, done)
+			if result.Result != Completed || result.Provider != provider {
+				t.Fatalf("result=%#v", result)
+			}
+			persisted, err := ReadLastResult(o.runtimeDir)
+			if err != nil || persisted.Provider != provider {
+				t.Fatalf("persisted=%#v error=%v", persisted, err)
+			}
+			var selected, terminal bool
+			for len(stream) > 0 {
+				event := <-stream
+				if event.Type == events.ProviderSelected && event.Provider == provider {
+					selected = true
+				}
+				if event.Type == events.Terminal && event.Provider == provider {
+					terminal = true
+				}
+			}
+			if !selected || !terminal {
+				t.Fatalf("global provider events: selected=%v terminal=%v", selected, terminal)
+			}
+		})
+	}
+}
+
+func TestTranscriptBudgetFailureNeverCallsProcessorOrSink(t *testing.T) {
+	chain, err := stt.NewChain(fixedTextProvider{text: "éé"}, nil, stt.MultiOptions{MaxTextBytes: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processorStarted := make(chan struct{})
+	target := &fakeSink{}
+	runtimeDir := t.TempDir()
+	o, err := NewOrchestrator(OrchestratorOptions{
+		Context: context.Background(), SessionID: "text-budget", RuntimeDir: runtimeDir,
+		Recorder:      &audio.FakeRecorder{FixturePath: sessionWAVDuration(t, 3*time.Second)},
+		RecordOptions: audio.RecordOptions{Directory: runtimeDir},
+		ChunkDuration: time.Second,
+		Transcriber:   chain,
+		Processor:     &fakeProcessor{started: processorStarted, result: textpipe.Result{Text: "final"}},
+		Sink:          target,
+		UI:            ui.NewNone(), Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := runOrchestrator(o)
+	waitForState(t, o, Recording)
+	if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Stop)); !response.OK {
+		t.Fatalf("stop response=%#v", response)
+	}
+	result := awaitResult(t, done)
+	if result.Result != Failed || result.Provider != "primary" || result.Error == nil || result.Error.Class != errs.ServerError || result.Error.Message != stt.TextBudgetExceeded {
+		t.Fatalf("result=%#v", result)
+	}
+	select {
+	case <-processorStarted:
+		t.Fatal("processor called after transcript budget overflow")
+	default:
+	}
+	if target.count() != 0 {
+		t.Fatalf("sink calls=%d", target.count())
+	}
+}
+
+func TestCapturedPartialEventsKeepPublicSegmentIndexes(t *testing.T) {
+	provider := &intermediateFailureProvider{}
+	chain, err := stt.NewChain(provider, nil, stt.MultiOptions{AllowPartial: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bus := events.NewBus()
+	stream, unsubscribe := bus.Subscribe(64)
+	defer unsubscribe()
+	runtimeDir := t.TempDir()
+	o, err := NewOrchestrator(OrchestratorOptions{
+		Context: context.Background(), SessionID: "captured-progress", RuntimeDir: runtimeDir,
+		Recorder:      &audio.FakeRecorder{FixturePath: sessionWAVDuration(t, 3*time.Second)},
+		RecordOptions: audio.RecordOptions{Directory: runtimeDir},
+		ChunkDuration: time.Second,
+		Transcriber:   chain,
+		Processor:     &fakeProcessor{result: textpipe.Result{Text: "final"}},
+		Sink:          &fakeSink{}, UI: ui.NewNone(), Bus: bus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := runOrchestrator(o)
+	waitForState(t, o, Recording)
+	if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Stop)); !response.OK {
+		t.Fatalf("stop response=%#v", response)
+	}
+	if result := awaitResult(t, done); result.Result != Completed {
+		t.Fatalf("result=%#v", result)
+	}
+
+	var got []events.Event
+	for len(stream) > 0 {
+		event := <-stream
+		if event.Type == events.PartialStarted || event.Type == events.PartialDone || event.Type == events.PartialFailed {
+			got = append(got, event)
+		}
+	}
+	wantTypes := []events.Type{
+		events.PartialStarted, events.PartialDone,
+		events.PartialStarted, events.PartialFailed,
+		events.PartialStarted, events.PartialDone,
+	}
+	wantIndexes := []int{1, 1, 2, 2, 3, 3}
+	if len(got) != len(wantTypes) {
+		t.Fatalf("partial events=%#v", got)
+	}
+	for i, event := range got {
+		if event.Type != wantTypes[i] || event.Partial != wantIndexes[i] || event.Total != 3 ||
+			event.Provider != "primary" || event.Component != "stt" {
+			t.Fatalf("partial event %d=%#v", i, event)
+		}
+		if event.Type == events.PartialFailed && event.ErrorClass != errs.ServerError {
+			t.Fatalf("failed event=%#v", event)
+		}
+	}
+}
+
+func TestLiveTranscriptBudgetAbortsCaptureWithoutStopOrSink(t *testing.T) {
+	chain, err := stt.NewChain(fixedTextProvider{text: "éé"}, nil, stt.MultiOptions{Workers: 2, MaxTextBytes: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processorStarted := make(chan struct{})
+	target := &fakeSink{}
+	runtimeDir := t.TempDir()
+	o, err := NewOrchestrator(OrchestratorOptions{
+		Context: context.Background(), SessionID: "live-text-budget", RuntimeDir: runtimeDir,
+		Recorder:      &audio.FakeRecorder{FixturePath: sessionWAVDuration(t, 5*time.Second)},
+		RecordOptions: audio.RecordOptions{Directory: runtimeDir},
+		ChunkDuration: time.Second,
+		LiveChunking:  true,
+		Transcriber:   chain,
+		Processor:     &fakeProcessor{started: processorStarted, result: textpipe.Result{Text: "final"}},
+		Sink:          target,
+		UI:            ui.NewNone(), Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := awaitResult(t, runOrchestrator(o))
+	if result.Result != Failed || result.Provider != "primary" || result.Error == nil || result.Error.Class != errs.ServerError || result.Error.Message != stt.TextBudgetExceeded {
+		t.Fatalf("result=%#v", result)
+	}
+	select {
+	case <-processorStarted:
+		t.Fatal("processor called after live transcript budget overflow")
+	default:
+	}
+	if target.count() != 0 {
+		t.Fatalf("sink calls=%d", target.count())
+	}
+}
+
+func TestDeliveryTimeoutReleasesSessionResourcesForNextSession(t *testing.T) {
+	runtimeDir := t.TempDir()
+	lock, err := AcquireLock(runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var active atomic.Int32
+	bus := events.NewBus()
+	defer bus.Close()
+	o, err := NewOrchestrator(OrchestratorOptions{
+		Context: context.Background(), SessionID: "timed-out-delivery", RuntimeDir: runtimeDir,
+		Recorder: &audio.FakeRecorder{FixturePath: sessionWAV(t)}, RecordOptions: audio.RecordOptions{Directory: runtimeDir},
+		Transcriber: &fakeTranscriber{result: stt.MultiResult{
+			Text: "raw", Provider: "primary", Segments: []stt.SegmentResult{{Provider: "primary"}},
+		}},
+		Processor: &fakeProcessor{result: textpipe.Result{Text: "final"}}, Sink: timedFailureSink{active: &active}, UI: ui.NewNone(), Bus: bus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(runtimeDir, "session.sock")
+	server, err := ipc.Listen(socket, o, bus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, stopServer := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(serveCtx) }()
+
+	done := runOrchestrator(o)
+	waitForState(t, o, Recording)
+	if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Stop)); !response.OK {
+		t.Fatalf("stop response = %#v", response)
+	}
+	result := awaitResult(t, done)
+	if result.Result != Failed || result.Error == nil || result.Error.Class != errs.SinkFailed {
+		t.Fatalf("result = %#v", result)
+	}
+	if active.Load() != 0 {
+		t.Fatalf("commandes encore actives = %d", active.Load())
+	}
+
+	stopServer()
+	if err := <-serveDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	nextLock, err := AcquireLock(runtimeDir)
+	if err != nil {
+		t.Fatalf("session suivante bloquée par le verrou: %v", err)
+	}
+	defer nextLock.Close()
+	nextServer, err := ipc.Listen(socket, o, bus)
+	if err != nil {
+		t.Fatalf("session suivante bloquée par le socket: %v", err)
+	}
+	if err := nextServer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
 	}
 }
 
@@ -449,7 +906,7 @@ func (s orderedClipboardSink) Deliver(_ context.Context, text string) error {
 	return nil
 }
 
-func TestRawClipboardRunsBetweenSTTAndCleanupWithoutEventLeak(t *testing.T) {
+func TestRawAndFinalClipboardRunAfterProcessingInOrderWithoutEventLeak(t *testing.T) {
 	var order []string
 	bus := events.NewBus()
 	defer bus.Close()
@@ -471,7 +928,7 @@ func TestRawClipboardRunsBetweenSTTAndCleanupWithoutEventLeak(t *testing.T) {
 	if result := awaitResult(t, done); result.Result != Completed {
 		t.Fatalf("result=%#v", result)
 	}
-	want := []string{"raw:brut-secret", "cleanup:brut-secret", "deliver:final"}
+	want := []string{"cleanup:brut-secret", "raw:brut-secret", "deliver:final"}
 	if strings.Join(order, "|") != strings.Join(want, "|") {
 		t.Fatalf("order=%v", order)
 	}
@@ -484,6 +941,113 @@ func TestRawClipboardRunsBetweenSTTAndCleanupWithoutEventLeak(t *testing.T) {
 		if strings.Contains(string(data), "brut-secret") || strings.Contains(string(data), "final") {
 			t.Fatalf("transcript leaked in event: %s", data)
 		}
+	}
+}
+
+type trackingClipboardSink struct {
+	mu       sync.Mutex
+	calls    []string
+	rawErr   error
+	finalErr error
+}
+
+func (s *trackingClipboardSink) CopyRaw(_ context.Context, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, "raw:"+text)
+	return s.rawErr
+}
+
+func (s *trackingClipboardSink) Deliver(_ context.Context, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, "final:"+text)
+	return s.finalErr
+}
+
+func (s *trackingClipboardSink) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
+}
+
+func TestProcessingWithoutDeliveryHasNoClipboardEffect(t *testing.T) {
+	t.Run("cancel blocked processor", func(t *testing.T) {
+		started := make(chan struct{})
+		processor := &fakeProcessor{started: started, gate: make(chan struct{})}
+		clipboard := &trackingClipboardSink{}
+		o := newTestOrchestrator(t, nil, nil, processor, clipboard)
+		done := runOrchestrator(o)
+		waitForState(t, o, Recording)
+		_ = o.Handle(context.Background(), ipc.NewRequest(ipc.Stop))
+		await(t, started)
+		if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Cancel)); !response.OK {
+			t.Fatalf("cancel response=%#v", response)
+		}
+		if result := awaitResult(t, done); result.Result != Cancelled {
+			t.Fatalf("result=%#v", result)
+		}
+		if calls := clipboard.snapshot(); len(calls) != 0 {
+			t.Fatalf("clipboard calls=%v", calls)
+		}
+	})
+
+	t.Run("empty processor result", func(t *testing.T) {
+		clipboard := &trackingClipboardSink{}
+		o := newTestOrchestrator(t, nil, nil, &fakeProcessor{result: textpipe.Result{Text: " \n"}}, clipboard)
+		done := runOrchestrator(o)
+		waitForState(t, o, Recording)
+		_ = o.Handle(context.Background(), ipc.NewRequest(ipc.Stop))
+		if result := awaitResult(t, done); result.Result != NoSpeech {
+			t.Fatalf("result=%#v", result)
+		}
+		if calls := clipboard.snapshot(); len(calls) != 0 {
+			t.Fatalf("clipboard calls=%v", calls)
+		}
+	})
+
+	t.Run("processor error", func(t *testing.T) {
+		clipboard := &trackingClipboardSink{}
+		processor := &fakeProcessor{err: errs.New(errs.ServerError, "processor", "refus")}
+		o := newTestOrchestrator(t, nil, nil, processor, clipboard)
+		done := runOrchestrator(o)
+		waitForState(t, o, Recording)
+		_ = o.Handle(context.Background(), ipc.NewRequest(ipc.Stop))
+		result := awaitResult(t, done)
+		if result.Result != Failed || result.Error == nil || result.Error.Class != errs.ServerError {
+			t.Fatalf("result=%#v", result)
+		}
+		if calls := clipboard.snapshot(); len(calls) != 0 {
+			t.Fatalf("clipboard calls=%v", calls)
+		}
+	})
+}
+
+func TestClipboardCopyFailuresAreSinkFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		rawErr   error
+		finalErr error
+		want     []string
+	}{
+		{name: "raw", rawErr: errs.New(errs.SinkFailed, "clipboard", "copie brute impossible"), want: []string{"raw:brut"}},
+		{name: "final", finalErr: errs.New(errs.SinkFailed, "clipboard", "copie finale impossible"), want: []string{"raw:brut", "final:final"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clipboard := &trackingClipboardSink{rawErr: test.rawErr, finalErr: test.finalErr}
+			o := newTestOrchestrator(t, nil, nil, nil, clipboard)
+			done := runOrchestrator(o)
+			waitForState(t, o, Recording)
+			_ = o.Handle(context.Background(), ipc.NewRequest(ipc.Stop))
+			result := awaitResult(t, done)
+			if result.Result != Failed || result.Error == nil || result.Error.Class != errs.SinkFailed {
+				t.Fatalf("result=%#v", result)
+			}
+			if calls := clipboard.snapshot(); strings.Join(calls, "|") != strings.Join(test.want, "|") {
+				t.Fatalf("clipboard calls=%v, want %v", calls, test.want)
+			}
+		})
 	}
 }
 
@@ -507,16 +1071,94 @@ func TestTerminalEventCarriesEffectiveProviderAndFailureClass(t *testing.T) {
 	t.Fatal("terminal event missing")
 }
 
+type sessionNotificationClient struct {
+	terminal  chan struct{}
+	release   chan struct{}
+	closed    chan struct{}
+	once      sync.Once
+	closeOnce sync.Once
+}
+
+func (c *sessionNotificationClient) Notify(ctx context.Context, _ uint32, notification ui.Notification) (uint32, error) {
+	if notification.Category != "murmur.error" {
+		return 1, nil
+	}
+	c.once.Do(func() { close(c.terminal) })
+	select {
+	case <-c.release:
+		return 2, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
+
+func (c *sessionNotificationClient) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func TestRunDrainsTerminalUIBeforeReturning(t *testing.T) {
+	client := &sessionNotificationClient{
+		terminal: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{}),
+	}
+	notifications := ui.NewNotify(client, func(string, ...any) {})
+	runtimeDir := t.TempDir()
+	o, err := NewOrchestrator(OrchestratorOptions{
+		Context: context.Background(), SessionID: "terminal-ui", RuntimeDir: runtimeDir,
+		Recorder:    &audio.FakeRecorder{StartErr: errs.New(errs.AudioFailed, "audio/fake", "refus")},
+		Transcriber: &fakeTranscriber{}, Processor: &fakeProcessor{}, Sink: &fakeSink{},
+		UI: notifications, Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := runOrchestrator(o)
+	await(t, client.terminal)
+	select {
+	case <-done:
+		t.Fatal("Run returned before the terminal UI completed")
+	default:
+	}
+	close(client.release)
+	result := awaitResult(t, done)
+	if result.Result != Failed {
+		t.Fatalf("result = %#v", result)
+	}
+	await(t, client.closed)
+}
+
+func TestRunReportsPersistenceFailureSeparately(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "missing")
+	o, err := NewOrchestrator(OrchestratorOptions{
+		Context: context.Background(), SessionID: "persistence-error", RuntimeDir: runtimeDir,
+		Recorder: &audio.FakeRecorder{
+			StartErr: errs.New(errs.AudioFailed, "audio/fake", "refus"),
+		},
+		Transcriber: &fakeTranscriber{}, Processor: &fakeProcessor{}, Sink: &fakeSink{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr, persistErr := o.Run()
+	if result.Result != Failed || errs.Classify(runErr) != errs.AudioFailed {
+		t.Fatalf("result=%#v runErr=%v", result, runErr)
+	}
+	if persistErr == nil || !errors.Is(persistErr, os.ErrNotExist) {
+		t.Fatalf("persistErr=%v, want missing runtime", persistErr)
+	}
+}
+
 type runOutcome struct {
-	result LastResult
-	err    error
+	result     LastResult
+	runErr     error
+	persistErr error
 }
 
 func runOrchestrator(o *Orchestrator) <-chan runOutcome {
 	done := make(chan runOutcome, 1)
 	go func() {
-		result, err := o.Run()
-		done <- runOutcome{result: result, err: err}
+		result, runErr, persistErr := o.Run()
+		done <- runOutcome{result: result, runErr: runErr, persistErr: persistErr}
 	}()
 	return done
 }
@@ -525,8 +1167,8 @@ func awaitResult(t *testing.T, done <-chan runOutcome) LastResult {
 	t.Helper()
 	select {
 	case outcome := <-done:
-		if outcome.err != nil && outcome.result.Result != Failed {
-			t.Fatalf("Run error: %v", outcome.err)
+		if err := errors.Join(outcome.runErr, outcome.persistErr); err != nil && outcome.result.Result != Failed {
+			t.Fatalf("Run error: %v", err)
 		}
 		return outcome.result
 	case <-time.After(2 * time.Second):
@@ -570,8 +1212,12 @@ func waitForIPCState(t *testing.T, client *ipc.Client, wanted State) {
 }
 
 func sessionWAV(t *testing.T) string {
+	return sessionWAVDuration(t, time.Second)
+}
+
+func sessionWAVDuration(t *testing.T, duration time.Duration) string {
 	t.Helper()
-	dataSize := uint32(wav.ByteRate)
+	dataSize := uint32(int64(wav.ByteRate) * int64(duration) / int64(time.Second))
 	header := make([]byte, 44)
 	copy(header[0:4], "RIFF")
 	binary.LittleEndian.PutUint32(header[4:8], dataSize+36)

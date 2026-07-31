@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "command": "transcribe",
+  "success": true,
+  "provider": "local",
+  "model": "large-v3",
+  "language": "fr",
+  "transcript_raw": "un",
+  "transcript_final": "un",
+  "segment_count": 2,
+  "segments": [
+    {"index": 0, "provider": "local", "model": "large-v3", "language": "fr", "transcript": "un"}
+  ],
+  "warnings": [],
+  "error": null
+}

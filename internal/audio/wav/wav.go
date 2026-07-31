@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"git.2027a.net/mathieu/murmur/internal/errs"
@@ -27,16 +29,17 @@ type File struct {
 	path       string
 	dataOffset int64
 	dataSize   int64
+	riffSize   int64
+	source     *fileSource
 }
 
 func Open(path string) (File, error) {
-	handle, err := os.Open(path)
+	source, err := openRegular(path, syscall.O_RDONLY)
 	if err != nil {
 		return File{}, audioError("impossible d'ouvrir le fichier WAV", err)
 	}
-	defer handle.Close()
-
-	info, err := handle.Stat()
+	defer source.Close()
+	info, err := source.Stat()
 	if err != nil {
 		return File{}, audioError("impossible d'inspecter le fichier WAV", err)
 	}
@@ -45,7 +48,7 @@ func Open(path string) (File, error) {
 	}
 
 	var riff [12]byte
-	if _, err := io.ReadFull(handle, riff[:]); err != nil {
+	if _, err := source.ReadAt(riff[:], 0); err != nil {
 		return File{}, audioError("en-tête WAV tronqué", err)
 	}
 	if string(riff[0:4]) != "RIFF" || string(riff[8:12]) != "WAVE" {
@@ -54,6 +57,30 @@ func Open(path string) (File, error) {
 	riffEnd := int64(binary.LittleEndian.Uint32(riff[4:8])) + 8
 	if riffEnd < 12 || riffEnd > info.Size() {
 		return File{}, audioError("taille RIFF invalide", io.ErrUnexpectedEOF)
+	}
+	handle, err := createImmutableSnapshot(source, riffEnd, path)
+	if err != nil {
+		return File{}, audioError("impossible de figer le fichier WAV", err)
+	}
+	return validateFinalSnapshot(handle, path, riffEnd)
+}
+
+func validateFinalSnapshot(handle *os.File, path string, riffEnd int64) (File, error) {
+	ok := false
+	defer func() {
+		if !ok {
+			_ = handle.Close()
+		}
+	}()
+	var riff [12]byte
+	if _, err := handle.ReadAt(riff[:], 0); err != nil {
+		return File{}, audioError("en-tête WAV tronqué", err)
+	}
+	if string(riff[0:4]) != "RIFF" || string(riff[8:12]) != "WAVE" {
+		return File{}, audioError("conteneur WAV RIFF invalide", nil)
+	}
+	if declared := int64(binary.LittleEndian.Uint32(riff[4:8])) + 8; declared != riffEnd {
+		return File{}, audioError("taille RIFF instable", nil)
 	}
 
 	var (
@@ -119,7 +146,11 @@ func Open(path string) (File, error) {
 	if dataSize%BlockAlign != 0 {
 		return File{}, audioError("données WAV non alignées sur un échantillon", nil)
 	}
-	return File{path: path, dataOffset: dataOffset, dataSize: dataSize}, nil
+	ok = true
+	return File{
+		path: path, dataOffset: dataOffset, dataSize: dataSize, riffSize: riffEnd,
+		source: &fileSource{handle: handle},
+	}, nil
 }
 
 func (f File) Path() string { return f.path }
@@ -133,17 +164,39 @@ func (f File) Duration() time.Duration {
 }
 
 func (f File) OpenData() (*io.SectionReader, *os.File, error) {
-	handle, err := os.Open(f.path)
-	if err != nil {
-		return nil, nil, audioError("impossible d'ouvrir les données WAV", err)
+	return f.openSection(f.dataOffset, f.dataSize, "impossible d'ouvrir les données WAV")
+}
+
+// OpenRIFF returns exactly the RIFF bytes validated by Open, excluding any
+// suffix physically present in the source file.
+func (f File) OpenRIFF() (*io.SectionReader, *os.File, error) {
+	return f.openSection(0, f.riffSize, "impossible d'ouvrir le conteneur WAV")
+}
+
+func (f File) openSection(offset, size int64, message string) (*io.SectionReader, *os.File, error) {
+	if f.source == nil {
+		return nil, nil, audioError(message, os.ErrInvalid)
 	}
-	return io.NewSectionReader(handle, f.dataOffset, f.dataSize), handle, nil
+	handle, err := f.source.dup(f.path)
+	if err != nil {
+		return nil, nil, audioError(message, err)
+	}
+	return io.NewSectionReader(handle, offset, size), handle, nil
+}
+
+// Close releases the stable source retained by Open. It is idempotent across
+// copies of File.
+func (f File) Close() error {
+	if f.source == nil {
+		return nil
+	}
+	return f.source.close()
 }
 
 // HasAudioData accepts an unfinished RIFF size but requires a valid fmt chunk
 // and at least one complete sample physically present after the data header.
 func HasAudioData(path string) (bool, error) {
-	handle, err := os.Open(path)
+	handle, err := openRegular(path, syscall.O_RDONLY)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
@@ -202,19 +255,29 @@ func HasAudioData(path string) (bool, error) {
 // Snapshot returns the complete PCM samples physically present in a growing
 // WAV. RIFF and data sizes are not trusted until the writer has finalized them.
 func Snapshot(path string) (File, bool, error) {
-	handle, err := os.Open(path)
+	handle, err := openRegular(path, syscall.O_RDONLY)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return File{}, false, nil
 		}
 		return File{}, false, audioError("impossible d'ouvrir le snapshot WAV", err)
 	}
-	defer handle.Close()
 	info, err := handle.Stat()
 	if err != nil {
+		_ = handle.Close()
 		return File{}, false, audioError("impossible d'inspecter le snapshot WAV", err)
 	}
-	if info.Size() < 12 {
+	return inspectGrowingSnapshot(handle, path, info.Size())
+}
+
+func inspectGrowingSnapshot(handle *os.File, path string, physicalSize int64) (File, bool, error) {
+	ok := false
+	defer func() {
+		if !ok {
+			_ = handle.Close()
+		}
+	}()
+	if physicalSize < 12 {
 		return File{}, false, nil
 	}
 	var riff [12]byte
@@ -225,7 +288,7 @@ func Snapshot(path string) (File, bool, error) {
 		return File{}, false, audioError("conteneur WAV RIFF invalide", nil)
 	}
 	formatSeen := false
-	for offset := int64(12); offset+8 <= info.Size(); {
+	for offset := int64(12); offset+8 <= physicalSize; {
 		var header [8]byte
 		if _, err := handle.ReadAt(header[:], offset); err != nil {
 			return File{}, false, nil
@@ -234,7 +297,7 @@ func Snapshot(path string) (File, bool, error) {
 		payload := offset + 8
 		switch string(header[0:4]) {
 		case "fmt ":
-			if size < 16 || payload+16 > info.Size() {
+			if size < 16 || payload+16 > physicalSize {
 				return File{}, false, nil
 			}
 			var format [16]byte
@@ -249,12 +312,16 @@ func Snapshot(path string) (File, bool, error) {
 			if !formatSeen {
 				return File{}, false, audioError("chunk data avant le format WAV", nil)
 			}
-			physical := info.Size() - payload
+			physical := physicalSize - payload
 			physical -= physical % BlockAlign
-			return File{path: path, dataOffset: payload, dataSize: physical}, true, nil
+			ok = true
+			return File{
+				path: path, dataOffset: payload, dataSize: physical, riffSize: payload + physical,
+				source: &fileSource{handle: handle},
+			}, true, nil
 		}
 		end := payload + size
-		if end < payload || end > info.Size() {
+		if end < payload || end > physicalSize {
 			return File{}, false, nil
 		}
 		offset = end + size%2
@@ -286,25 +353,47 @@ func AppendPCM(path string, data []byte) error {
 }
 
 func FinalizeGrowing(path string) (File, error) {
-	snapshot, ok, err := Snapshot(path)
+	handle, err := openRegular(path, syscall.O_RDWR)
+	if err != nil {
+		return File{}, audioError("impossible d'ouvrir le WAV à finaliser", err)
+	}
+	defer handle.Close()
+	info, err := handle.Stat()
+	if err != nil {
+		return File{}, audioError("impossible d'inspecter le WAV à finaliser", err)
+	}
+	inspectionFD, err := syscall.Dup(int(handle.Fd()))
+	if err != nil {
+		return File{}, audioError("impossible de dupliquer le WAV à finaliser", err)
+	}
+	syscall.CloseOnExec(inspectionFD)
+	inspection := os.NewFile(uintptr(inspectionFD), path)
+	if inspection == nil {
+		_ = syscall.Close(inspectionFD)
+		return File{}, audioError("descripteur de contrôle du WAV final invalide", nil)
+	}
+	snapshot, ok, err := inspectGrowingSnapshot(inspection, path, info.Size())
 	if err != nil {
 		return File{}, err
+	}
+	if ok {
+		defer snapshot.Close()
 	}
 	if !ok || snapshot.dataSize > int64(^uint32(0))-36 {
 		return File{}, audioError("WAV en croissance non finalisable", nil)
 	}
-	handle, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		return File{}, audioError("impossible d'ouvrir le WAV à finaliser", err)
-	}
 	header := canonicalHeader(uint32(snapshot.dataSize))
 	_, writeErr := handle.WriteAt(header, 0)
 	syncErr := handle.Sync()
-	closeErr := handle.Close()
-	if writeErr != nil || syncErr != nil || closeErr != nil {
-		return File{}, audioError("impossible de finaliser le WAV en croissance", errors.Join(writeErr, syncErr, closeErr))
+	if writeErr != nil || syncErr != nil {
+		return File{}, audioError("impossible de finaliser le WAV en croissance", errors.Join(writeErr, syncErr))
 	}
-	return Open(path)
+	riffSize := snapshot.dataOffset + snapshot.dataSize
+	final, err := createImmutableSnapshot(handle, riffSize, path)
+	if err != nil {
+		return File{}, audioError("impossible de figer le WAV final", err)
+	}
+	return validateFinalSnapshot(final, path, riffSize)
 }
 
 func (f File) Slice(outputDir string, start, samples int64) (File, error) {
@@ -314,7 +403,7 @@ func (f File) Slice(outputDir string, start, samples int64) (File, error) {
 	if outputDir == "" {
 		outputDir = filepath.Dir(f.path)
 	}
-	source, err := os.Open(f.path)
+	source, err := f.source.dup(f.path)
 	if err != nil {
 		return File{}, audioError("impossible d'ouvrir le WAV à segmenter", err)
 	}
@@ -345,7 +434,7 @@ func (f File) Split(outputDir string, d, minTail time.Duration) ([]File, error) 
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return nil, audioError("impossible de créer le répertoire des segments", err)
 	}
-	source, err := os.Open(f.path)
+	source, err := f.source.dup(f.path)
 	if err != nil {
 		return nil, audioError("impossible d'ouvrir le WAV à découper", err)
 	}
@@ -354,7 +443,8 @@ func (f File) Split(outputDir string, d, minTail time.Duration) ([]File, error) 
 	created := make([]string, 0, len(sizes))
 	result := make([]File, 0, len(sizes))
 	rollback := func() {
-		for _, path := range created {
+		for i, path := range created {
+			_ = result[i].Close()
 			_ = os.Remove(path)
 		}
 	}
@@ -371,6 +461,30 @@ func (f File) Split(outputDir string, d, minTail time.Duration) ([]File, error) 
 		offset += dataSize
 	}
 	return result, nil
+}
+
+// SegmentCount returns the number of files Split would produce without
+// allocating its size plan or creating files.
+func (f File) SegmentCount(d, minTail time.Duration) (int, error) {
+	if d <= 0 {
+		return 0, audioError("durée de segment invalide", nil)
+	}
+	if minTail < 0 {
+		return 0, audioError("durée minimale de fin invalide", nil)
+	}
+	maximum := durationSamples(d)
+	if maximum < 1 {
+		return 0, audioError("durée de segment inférieure à un échantillon", nil)
+	}
+	total := f.Samples()
+	if total <= maximum {
+		return 1, nil
+	}
+	count := total / maximum
+	if remainder := total % maximum; remainder > 0 && (count == 0 || remainder >= durationSamples(minTail)) {
+		count++
+	}
+	return int(count), nil
 }
 
 // Concat writes the sample data of files in order into one canonical WAV.
@@ -487,6 +601,58 @@ func writeSegment(dir string, source *os.File, offset, dataSize int64) (File, st
 	}
 	ok = true
 	return segment, path, nil
+}
+
+type fileSource struct {
+	mu       sync.Mutex
+	handle   *os.File
+	closeErr error
+}
+
+func (s *fileSource) dup(name string) (*os.File, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handle == nil {
+		return nil, os.ErrClosed
+	}
+	fd, err := syscall.Dup(int(s.handle.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	syscall.CloseOnExec(fd)
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+func (s *fileSource) close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handle == nil {
+		return s.closeErr
+	}
+	s.closeErr = s.handle.Close()
+	s.handle = nil
+	if s.closeErr != nil {
+		return audioError("impossible de fermer la source WAV", s.closeErr)
+	}
+	return nil
+}
+
+func openRegular(path string, access int) (*os.File, error) {
+	fd, err := syscall.Open(path, access|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	handle := os.NewFile(uintptr(fd), path)
+	info, err := handle.Stat()
+	if err != nil {
+		_ = handle.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = handle.Close()
+		return nil, fmt.Errorf("la source WAV doit être un fichier régulier")
+	}
+	return handle, nil
 }
 
 func canonicalHeader(dataSize uint32) []byte {

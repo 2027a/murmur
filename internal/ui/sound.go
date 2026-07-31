@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"git.2027a.net/mathieu/murmur/internal/events"
+	"git.2027a.net/mathieu/murmur/internal/logging"
 	"git.2027a.net/mathieu/murmur/internal/sysexec"
 )
 
@@ -138,7 +139,7 @@ func (s *Sound) run() {
 
 func (s *Sound) play() {
 	if !s.playOnce() {
-		warning(s.warn, "aucun lecteur sonore disponible")
+		warning(logging.ComponentUI, s.warn, "aucun lecteur sonore disponible")
 	}
 }
 

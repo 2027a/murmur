@@ -66,6 +66,13 @@ func (app App) start(ctx context.Context, stdout io.Writer, clipboardOnly bool) 
 		configReader.Close()
 		return err
 	}
+	logDestination, err := logging.OpenDestination(logging.Path(runtimeDir))
+	if err != nil {
+		readyWriter.Close()
+		configReader.Close()
+		return fmt.Errorf("ouverture du log opérationnel: %w", err)
+	}
+	defer logDestination.Close()
 	cmd := exec.Command(executable, internalArgs(3, 4, 5)...)
 	cmd.ExtraFiles = []*os.File{lock.File(), readyWriter, configReader}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -196,6 +203,19 @@ func (app App) runSession(ctx context.Context, args []string, stdout io.Writer) 
 		return err
 	}
 	logging.Configure(cfg.Logging.Level)
+	if err := logging.ConfigureFile(cfg.Logging.Level, logging.Path(runtimeDir), int64(cfg.Logging.MaxBytes), cfg.Logging.MaxFiles); err != nil {
+		logging.Warnf(logging.ComponentLogging, "destination rotative indisponible")
+	} else {
+		defer func() { _ = logging.Close() }()
+	}
+	logging.Debugf(logging.ComponentSession, "configuration de session validée")
+	defer func() {
+		if returnErr != nil {
+			logging.Errorf(logging.ComponentSession, "session terminée avec une erreur")
+		} else {
+			logging.Infof(logging.ComponentSession, "session terminée")
+		}
+	}()
 	if err := config.ValidateClipboardOnly(cfg, snapshot.ClipboardOnly); err != nil {
 		return err
 	}
@@ -206,16 +226,27 @@ func (app App) runSession(ctx context.Context, args []string, stdout io.Writer) 
 	defer os.Remove(path)
 	bus := events.NewBus()
 	defer bus.Close()
-	if cfg.Logging.SessionJournal {
-		journal, journalErr := events.NewJournal(bus, filepath.Join(runtimeDir, "session.jsonl"), events.JournalOptions{
-			MaxBytes: int64(cfg.Logging.SessionMaxBytes), MaxFiles: cfg.Logging.SessionMaxFiles,
-		})
-		if journalErr != nil {
-			return journalErr
+	var journal *events.Journal
+	defer func() {
+		if journal != nil {
+			returnErr = errors.Join(returnErr, journal.Close())
 		}
-		defer journal.Close()
+	}()
+	if cfg.Logging.SessionJournal {
+		journal, err = events.NewJournal(bus, filepath.Join(runtimeDir, "session.jsonl"), events.JournalOptions{
+			MaxBytes: int64(cfg.Logging.SessionMaxBytes), MaxFiles: cfg.Logging.SessionMaxFiles,
+			OnFailure: func(operation events.JournalOperation) {
+				logging.Warnf(logging.ComponentSessionJournal, "%s", events.JournalFailureMessage(operation))
+			},
+		})
+		if err != nil {
+			return err
+		}
 	}
 	sessionID := newSessionID()
+	if err := session.MarkLastResultPending(runtimeDir, sessionID); err != nil {
+		return err
+	}
 	bootstrap, err := session.NewBootstrap(session.BootstrapOptions{
 		Context: ctx, SessionID: sessionID, Bus: bus,
 	})
@@ -236,6 +267,7 @@ func (app App) runSession(ctx context.Context, args []string, stdout io.Writer) 
 	}
 	bootstrapSent = true
 	_ = ready.Close()
+	logging.Infof(logging.ComponentSession, "session démarrée")
 
 	orchestrator, err := session.Build(session.BuildOptions{
 		Context: bootstrap.Context(), Config: cfg, RuntimeDir: runtimeDir, SessionID: sessionID,
@@ -243,35 +275,80 @@ func (app App) runSession(ctx context.Context, args []string, stdout io.Writer) 
 	})
 	if err != nil {
 		result := bootstrap.Finish(err, "")
+		journalErr := closeSessionJournal(&journal)
+		if journalErr != nil {
+			session.AddJournalWarning(&result)
+		}
 		persistErr := session.WriteLastResult(runtimeDir, result)
+		var commitErr error
+		if persistErr == nil {
+			commitErr = session.CommitLastResult(runtimeDir, result.SessionID)
+		}
 		stopServer()
 		serveErr := <-serveDone
 		if result.Result == session.Cancelled {
-			return errors.Join(persistErr, serveErr)
+			return errors.Join(journalErr, persistErr, commitErr, serveErr)
 		}
-		return errors.Join(err, persistErr, serveErr)
+		return errors.Join(err, journalErr, persistErr, commitErr, serveErr)
 	}
 	bootstrap.Attach(orchestrator)
 
-	runDone := make(chan error, 1)
+	type runOutcome struct {
+		result     session.LastResult
+		runErr     error
+		persistErr error
+	}
+	runDone := make(chan runOutcome, 1)
 	go func() {
-		_, runErr := orchestrator.Run()
-		runDone <- runErr
+		result, runErr, persistErr := orchestrator.Run()
+		runDone <- runOutcome{result: result, runErr: runErr, persistErr: persistErr}
 	}()
 	select {
-	case err = <-runDone:
+	case outcome := <-runDone:
 		stopServer()
 		serveErr := <-serveDone
-		return errors.Join(err, serveErr)
+		journalErr := closeSessionJournal(&journal)
+		rewriteErr := persistJournalWarning(runtimeDir, &outcome.result, journalErr)
+		persistErr := errors.Join(outcome.persistErr, rewriteErr)
+		commitErr := commitLastResult(runtimeDir, outcome.result.SessionID, persistErr)
+		return errors.Join(outcome.runErr, serveErr, journalErr, persistErr, commitErr)
 	case serveErr := <-serveDone:
 		if serveErr == nil {
 			serveErr = fmt.Errorf("serveur IPC arrêté avant la session")
 		}
 		_ = orchestrator.Handle(context.Background(), ipc.NewRequest(ipc.Cancel))
-		runErr := <-runDone
+		outcome := <-runDone
 		stopServer()
-		return errors.Join(serveErr, runErr)
+		journalErr := closeSessionJournal(&journal)
+		rewriteErr := persistJournalWarning(runtimeDir, &outcome.result, journalErr)
+		persistErr := errors.Join(outcome.persistErr, rewriteErr)
+		commitErr := commitLastResult(runtimeDir, outcome.result.SessionID, persistErr)
+		return errors.Join(serveErr, outcome.runErr, journalErr, persistErr, commitErr)
 	}
+}
+
+func closeSessionJournal(journal **events.Journal) error {
+	if journal == nil || *journal == nil {
+		return nil
+	}
+	err := (*journal).Close()
+	*journal = nil
+	return err
+}
+
+func persistJournalWarning(runtimeDir string, result *session.LastResult, journalErr error) error {
+	if journalErr == nil {
+		return nil
+	}
+	session.AddJournalWarning(result)
+	return session.WriteLastResult(runtimeDir, *result)
+}
+
+func commitLastResult(runtimeDir, sessionID string, persistErr error) error {
+	if persistErr != nil {
+		return nil
+	}
+	return session.CommitLastResult(runtimeDir, sessionID)
 }
 
 type sessionSnapshot struct {

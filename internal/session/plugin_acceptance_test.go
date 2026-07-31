@@ -47,7 +47,7 @@ func TestAcceptance_16_InvalidMarkdownFallsBackWithoutTechnicalTokens(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Text != cleaned || len(result.Warnings) != 1 || result.Warnings[0].Stage != "plugin" {
+	if result.Text != cleaned || len(result.Warnings) != 1 || result.Warnings[0].Component != "plugin" {
 		t.Fatalf("Run() = %#v", result)
 	}
 	if strings.Contains(result.Text, "MURMUR_CMD") || strings.Contains(result.Text, "__WQ_") {

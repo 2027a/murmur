@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "command": "cleanup",
+  "success": true,
+  "provider": "local",
+  "model": "cleanup-model",
+  "language": "",
+  "transcript_raw": "texte",
+  "transcript_final": "texte",
+  "segment_count": 1,
+  "segments": [
+    {"index": 0, "provider": "local", "model": "cleanup-model", "language": "", "transcript": "texte"}
+  ],
+  "warnings": [],
+  "error": null
+}

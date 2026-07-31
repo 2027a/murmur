@@ -15,9 +15,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -76,6 +78,45 @@ func TestAcceptance_01_LANNominalCleansAndPastesOnce(t *testing.T) {
 	calls := executor.Calls()
 	if len(calls) != 2 || calls[0].Name != "wl-copy" || string(calls[0].Stdin) != "bonjour propre" || calls[1].Name != "wtype" {
 		t.Fatalf("delivery calls=%#v", calls)
+	}
+}
+
+func TestAcceptance_MUR009_ProviderControlsAreFilteredOnlyForActiveInjection(t *testing.T) {
+	const canary = "a\r\nb\nc\rd\te\x1bf\x00g\x7fh\u0085i\u009fjé🙂"
+	const safe = "a b c d efghijé🙂"
+	server := transcriptionServer(t, canary)
+	defer server.Close()
+
+	cfg := baseConfig(server.URL)
+	cfg.Sink.Mode = "paste"
+	cfg.Sink.ClipboardMode = "clean-only"
+	cfg.Sink.PasteShortcuts = []string{"ctrl+v"}
+	executor := &sysexec.FakeExecutor{RunFunc: func(_ context.Context, name string, args []string, _ []byte) ([]byte, error) {
+		if name == "wtype" && !reflect.DeepEqual(args, []string{"-"}) {
+			return nil, errors.New("shortcut failed")
+		}
+		return nil, nil
+	}}
+	o := buildOrchestrator(t, cfg, buildFixture(t, time.Second), executor, nil, nil, false)
+	result, runErr := stopSession(t, o)
+	if runErr != nil || result.Result != session.Completed {
+		t.Fatalf("active result=%#v error=%v", result, runErr)
+	}
+	calls := executor.Calls()
+	if len(calls) != 3 || calls[0].Name != "wl-copy" || string(calls[0].Stdin) != safe ||
+		calls[1].Name != "wtype" || calls[2].Name != "wtype" || !reflect.DeepEqual(calls[2].Args, []string{"-"}) || string(calls[2].Stdin) != safe {
+		t.Fatalf("active delivery calls=%#v", calls)
+	}
+
+	passiveExecutor := &sysexec.FakeExecutor{}
+	o = buildOrchestrator(t, cfg, buildFixture(t, time.Second), passiveExecutor, nil, nil, true)
+	result, runErr = stopSession(t, o)
+	if runErr != nil || result.Result != session.Completed {
+		t.Fatalf("clipboard-only result=%#v error=%v", result, runErr)
+	}
+	calls = passiveExecutor.Calls()
+	if len(calls) != 1 || calls[0].Name != "wl-copy" || string(calls[0].Stdin) != canary {
+		t.Fatalf("clipboard-only calls=%#v", calls)
 	}
 }
 
@@ -209,6 +250,102 @@ func TestAcceptance_05_FallbackReusesCaptureAudio(t *testing.T) {
 	}
 }
 
+func TestAcceptance_MUR001_UploadUsesValidatedBytesWithAndWithoutChunking(t *testing.T) {
+	for _, chunkDuration := range []time.Duration{0, time.Second} {
+		t.Run(chunkDuration.String(), func(t *testing.T) {
+			var mu sync.Mutex
+			var uploads [][]byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data := multipartAudio(t, r)
+				mu.Lock()
+				uploads = append(uploads, append([]byte(nil), data...))
+				mu.Unlock()
+				writeJSON(t, w, map[string]string{"text": "ok"})
+			}))
+			defer server.Close()
+
+			path := buildFixture(t, 2*time.Second)
+			validated, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := handle.WriteString("CANARY-SUFFIX"); err != nil {
+				t.Fatal(err)
+			}
+			if err := handle.Close(); err != nil {
+				t.Fatal(err)
+			}
+			file, err := wav.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = file.Close() })
+			validatedPath := path + ".validated"
+			if err := os.Rename(path, validatedPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("replacement-canary"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			segments, err := audio.Chunk(file, audio.ChunkOptions{
+				Duration: chunkDuration, MinTail: time.Second, OutputDir: t.TempDir(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = audio.RemoveSegments(segments) })
+
+			chain, err := core.BuildTranscriber(context.Background(), baseConfig(server.URL), core.BuildOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			requests := make([]stt.Segment, len(segments))
+			for i, segment := range segments {
+				requests[i] = stt.Segment{Index: segment.Index, Request: stt.Request{Audio: segment.File}}
+			}
+			if _, err := chain.TranscribeSegments(context.Background(), requests, stt.Progress{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := audio.RemoveSegments(segments); err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			mu.Lock()
+			got := append([][]byte(nil), uploads...)
+			mu.Unlock()
+			if chunkDuration == 0 {
+				if len(got) != 1 {
+					t.Fatalf("upload non découpé: parties=%d, attendu=1", len(got))
+				}
+				if !bytes.Equal(got[0], validated) {
+					t.Fatalf("upload non découpé: taille=%d attendu=%d", len(got[0]), len(validated))
+				}
+				return
+			}
+			var pcm []byte
+			for _, upload := range got {
+				if len(upload) < 44 || int(binary.LittleEndian.Uint32(upload[4:8]))+8 != len(upload) || int(binary.LittleEndian.Uint32(upload[40:44]))+44 != len(upload) {
+					t.Fatalf("segment non canonique: %d octets", len(upload))
+				}
+				if bytes.Contains(upload, []byte("CANARY")) || bytes.Contains(upload, []byte("replacement")) {
+					t.Fatal("canari présent dans un segment uploadé")
+				}
+				pcm = append(pcm, upload[44:]...)
+			}
+			if len(got) != 2 || !bytes.Equal(pcm, validated[44:]) {
+				t.Fatalf("PCM segmenté: parties=%d pcm=%d attendu=%d", len(got), len(pcm), len(validated)-44)
+			}
+		})
+	}
+}
+
 func TestConfiguredRetriesAreAppliedByCore(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -233,12 +370,13 @@ func TestConfiguredRetriesAreAppliedByCore(t *testing.T) {
 }
 
 func TestAcceptance_06_CleanupFailureDeliversDeterministicFallbackAndDegradedEvent(t *testing.T) {
+	const canary = "MURMUR-SENSITIVE-CLEANUP-CANARY"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/audio/transcriptions") {
 			writeJSON(t, w, map[string]string{"text": "ouvrez les guillemets brut fermez les guillemets"})
 			return
 		}
-		http.Error(w, "cleanup unavailable", http.StatusServiceUnavailable)
+		http.Error(w, canary, http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
 
@@ -252,10 +390,18 @@ func TestAcceptance_06_CleanupFailureDeliversDeterministicFallbackAndDegradedEve
 	var output bytes.Buffer
 	o := buildOrchestrator(t, cfg, buildFixture(t, time.Second), &sysexec.FakeExecutor{}, &output, bus, false)
 	result, runErr := stopSession(t, o)
-	if runErr != nil || result.Result != session.Completed || output.String() != "« brut »\n" || len(result.Warnings) != 1 {
+	if runErr != nil || result.Result != session.Completed || output.String() != "« brut »\n" || len(result.Warnings) != 1 ||
+		result.Warnings[0].Class != errs.ServerError || result.Warnings[0].Component != "cleanup" {
 		t.Fatalf("result=%#v error=%v output=%q", result, runErr, output.String())
 	}
-	if !hasEvent(stream, events.Degraded, "cleanup") {
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(canary)) {
+		t.Fatalf("sensitive cleanup body leaked in %s", encoded)
+	}
+	if !hasClassifiedEvent(stream, events.Degraded, "cleanup", errs.ServerError) {
 		t.Fatal("cleanup degradation event missing")
 	}
 }
@@ -396,7 +542,7 @@ func TestAcceptance_08_LiveWorkersAreBoundedOrderedAndCancellable(t *testing.T) 
 		var output bytes.Buffer
 		o := buildOrchestrator(t, cfg, buildFixture(t, 2500*time.Millisecond), &sysexec.FakeExecutor{}, &output, nil, false)
 		result, runErr := stopSession(t, o)
-		if runErr != nil || result.Result != session.Completed || output.String() != "s0\n" || len(result.Warnings) != 1 || result.Warnings[0] != stt.WarningPartial {
+		if runErr != nil || result.Result != session.Completed || output.String() != "s0\n" || len(result.Warnings) != 1 || result.Warnings[0].Message != stt.WarningPartial {
 			t.Fatalf("result=%#v error=%v output=%q", result, runErr, output.String())
 		}
 	})
@@ -428,7 +574,7 @@ func TestAcceptance_08_LiveWorkersAreBoundedOrderedAndCancellable(t *testing.T) 
 		if runErr != nil || result.Result != session.Completed || output.String() != "primary-0 fallback-1\n" {
 			t.Fatalf("result=%#v error=%v output=%q", result, runErr, output.String())
 		}
-		if !containsString(result.Warnings, stt.WarningMixedProviders) {
+		if !containsWarning(result.Warnings, stt.WarningMixedProviders) {
 			t.Fatalf("warning de mélange absent: %v", result.Warnings)
 		}
 	})
@@ -477,6 +623,78 @@ func TestAcceptance_08_LiveWorkersAreBoundedOrderedAndCancellable(t *testing.T) 
 			t.Fatalf("workers HTTP encore actifs: %d", active.Load())
 		}
 	})
+}
+
+func TestAcceptance_MUR015_MixedProviderProvenanceIsGlobalAndOrderIndependent(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		live        bool
+		failedIndex int
+		wantOutput  string
+		wantPartial []string
+	}{
+		{
+			name: "batch primary then fallback", failedIndex: 1,
+			wantOutput: "primary-0 fallback-1\n", wantPartial: []string{"primary", "fallback"},
+		},
+		{
+			name: "live fallback then primary", live: true, failedIndex: 0,
+			wantOutput: "fallback-0 primary-1\n", wantPartial: []string{"fallback", "primary"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data := multipartAudio(t, r)
+				index := sampleSegmentIndex(t, data)
+				fallback := strings.HasPrefix(r.URL.Path, "/fallback/")
+				if !fallback && index == test.failedIndex {
+					http.Error(w, "failed", http.StatusServiceUnavailable)
+					return
+				}
+				provider := "primary"
+				if fallback {
+					provider = "fallback"
+				}
+				writeJSON(t, w, map[string]string{"text": fmt.Sprintf("%s-%d", provider, index)})
+			}))
+			defer server.Close()
+
+			cfg := baseConfig(server.URL + "/primary")
+			cfg.STT.Provider = "primary"
+			cfg.STT.Providers["primary"] = cfg.STT.Providers["local"]
+			delete(cfg.STT.Providers, "local")
+			cfg.STT.Fallback = "fallback"
+			cfg.STT.Providers["fallback"] = providerConfig(server.URL+"/fallback", "local", "fallback", "fr")
+			cfg.STT.ChunkSeconds = 1
+			cfg.STT.LiveChunking = test.live
+			cfg.STT.AllowMixedProviders = true
+			bus := events.NewBus()
+			stream, unsubscribe := bus.Subscribe(32)
+			defer unsubscribe()
+			var output bytes.Buffer
+			o := buildOrchestrator(t, cfg, buildFixture(t, 2500*time.Millisecond), &sysexec.FakeExecutor{}, &output, bus, false)
+			result, runErr := stopSession(t, o)
+			if runErr != nil || result.Result != session.Completed || result.Provider != stt.ProviderMixed || output.String() != test.wantOutput {
+				t.Fatalf("result=%#v error=%v output=%q", result, runErr, output.String())
+			}
+			if !containsWarning(result.Warnings, stt.WarningMixedProviders) {
+				t.Fatalf("warning de mélange absent: %v", result.Warnings)
+			}
+			var selected, terminal bool
+			providersByPartial := make(map[int]string)
+			for len(stream) > 0 {
+				event := <-stream
+				selected = selected || event.Type == events.ProviderSelected && event.Provider == stt.ProviderMixed
+				terminal = terminal || event.Type == events.Terminal && event.Provider == stt.ProviderMixed
+				if event.Type == events.PartialDone {
+					providersByPartial[event.Partial-1] = event.Provider
+				}
+			}
+			if !selected || !terminal || providersByPartial[0] != test.wantPartial[0] || providersByPartial[1] != test.wantPartial[1] {
+				t.Fatalf("events: selected=%v terminal=%v partials=%v", selected, terminal, providersByPartial)
+			}
+		})
+	}
 }
 
 func TestAcceptance_10_ClipboardOnlyOverridesGlobalPaste(t *testing.T) {
@@ -611,14 +829,16 @@ func TestAcceptance_12_NoUIOrDesktopToolsRequiredForStdout(t *testing.T) {
 for output do :; done
 cp "$MURMUR_TEST_WAV" "$output" || exit 1
 trap 'exit 130' INT TERM
+[ -z "$MURMUR_TEST_READY" ] || : > "$MURMUR_TEST_READY"
 while :; do sleep 1; done
 `)
 		dictateFixture := buildFixture(t, time.Second)
 		dictateEnv := replaceEnvironment(env,
 			"PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"),
 			"MURMUR_TEST_WAV="+dictateFixture,
+			"MURMUR_TEST_READY=",
 		)
-		stdout, stderr, code = runSubprocess(t, dictateEnv, strings.NewReader(""), binary, "dictate", "--sink", "stdout")
+		stdout, stderr, code = runSubprocess(t, dictateEnv, strings.NewReader(""), binary, "dictate")
 		if code != 0 || string(stdout) != "bonjour propre\n" || len(stderr) != 0 {
 			t.Fatalf("dictate stdout code=%d stdout=%q stderr=%q", code, stdout, stderr)
 		}
@@ -632,6 +852,108 @@ while :; do sleep 1; done
 			t.Fatalf("dictated file=%q error=%v", data, err)
 		}
 
+		readyMarker := filepath.Join(base, "dictate-signal-ready")
+		signalEnv := replaceEnvironment(dictateEnv, "MURMUR_TEST_READY="+readyMarker)
+		stdinReader, stdinWriter, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var signalStdout, signalStderr bytes.Buffer
+		signalCommand := exec.Command(binary, "dictate", "--sink", "stdout")
+		signalCommand.Env = signalEnv
+		signalCommand.Stdin = stdinReader
+		signalCommand.Stdout = &signalStdout
+		signalCommand.Stderr = &signalStderr
+		if err := signalCommand.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = signalCommand.Process.Kill()
+			_ = stdinReader.Close()
+			_ = stdinWriter.Close()
+		})
+		waitForFile(t, readyMarker)
+		probe := make([]byte, pipeCapacity(t, stdinWriter)+1)
+		stdinDrained := make(chan error, 1)
+		go func() {
+			_, err := io.Copy(stdinWriter, bytes.NewReader(probe))
+			stdinDrained <- err
+		}()
+		select {
+		case err := <-stdinDrained:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("dictate did not start reading stdin")
+		}
+		if err := signalCommand.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		waitErr := make(chan error, 1)
+		go func() { waitErr <- signalCommand.Wait() }()
+		select {
+		case err := <-waitErr:
+			if err != nil {
+				t.Fatalf("dictate signal: %v stdout=%q stderr=%q", err, signalStdout.String(), signalStderr.String())
+			}
+		case <-time.After(3 * time.Second):
+			_ = signalCommand.Process.Kill()
+			t.Fatal("dictate did not stop after SIGTERM")
+		}
+		_ = stdinReader.Close()
+		_ = stdinWriter.Close()
+		if signalStdout.String() != "bonjour propre\n" || signalStderr.Len() != 0 {
+			t.Fatalf("dictate signal stdout=%q stderr=%q", signalStdout.String(), signalStderr.String())
+		}
+
+		writeExecutable(t, filepath.Join(tools, "pw-record"), `#!/bin/sh
+for output do :; done
+cp "$MURMUR_TEST_WAV" "$output" || exit 1
+sleep 1
+exit 0
+`)
+		beforeSTT, beforeCleanup := sttCalls.Load(), cleanupCalls.Load()
+		beforeSink, err := os.ReadFile(dictatedFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blockedReader, blockedWriter, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = blockedReader.Close()
+			_ = blockedWriter.Close()
+		})
+		started := time.Now()
+		stdout, stderr, code = runSubprocess(t, dictateEnv, blockedReader, binary, "dictate", "--sink", "file", "--json", "--events")
+		_ = blockedReader.Close()
+		_ = blockedWriter.Close()
+		if elapsed := time.Since(started); elapsed > 3*time.Second {
+			t.Fatalf("dictate recorder failure took %s", elapsed)
+		}
+		if code != 1 || !bytes.Contains(stdout, []byte(`"class":"audio_failed"`)) || bytes.Contains(stdout, []byte("bonjour")) {
+			t.Fatalf("dictate recorder failure code=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		assertJSONLEvents(t, stderr)
+		if sttCalls.Load() != beforeSTT || cleanupCalls.Load() != beforeCleanup {
+			t.Fatalf("provider called after recorder failure: stt=%d/%d cleanup=%d/%d", sttCalls.Load(), beforeSTT, cleanupCalls.Load(), beforeCleanup)
+		}
+		afterSink, err := os.ReadFile(dictatedFile)
+		if err != nil || !bytes.Equal(afterSink, beforeSink) {
+			t.Fatalf("sink changed after recorder failure: before=%q after=%q error=%v", beforeSink, afterSink, err)
+		}
+		entries, err := os.ReadDir(filepath.Join(base, "runtime", "murmur"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "murmur-audio-") {
+				t.Fatalf("capture not cleaned after recorder failure: %s", entry.Name())
+			}
+		}
+
 		invalid := filepath.Join(t.TempDir(), "invalid.wav")
 		if err := os.WriteFile(invalid, []byte("not a wav"), 0o600); err != nil {
 			t.Fatal(err)
@@ -640,7 +962,7 @@ while :; do sleep 1; done
 		if code != 1 || len(stderr) != 0 || !bytes.Contains(stdout, []byte(`"class":"audio_failed"`)) || bytes.Contains(stdout, []byte("not a wav")) {
 			t.Fatalf("invalid WAV code=%d stdout=%q stderr=%q", code, stdout, stderr)
 		}
-		if sttCalls.Load() != 4 || cleanupCalls.Load() != 4 {
+		if sttCalls.Load() != 5 || cleanupCalls.Load() != 5 {
 			t.Fatalf("provider calls: stt=%d cleanup=%d", sttCalls.Load(), cleanupCalls.Load())
 		}
 
@@ -770,6 +1092,167 @@ while :; do sleep 1; done
 	}))
 	defer server.Close()
 
+	t.Run("invalid preflight has no child or external effect", func(t *testing.T) {
+		for _, kind := range []string{"stt-model", "cleanup-model", "shortcut", "clipboard", "duration"} {
+			t.Run(kind, func(t *testing.T) {
+				base := t.TempDir()
+				configDir := filepath.Join(base, "config", "murmur")
+				runtimeBase := filepath.Join(base, "runtime")
+				canaryTools := filepath.Join(base, "tools")
+				for _, directory := range []string{configDir, runtimeBase, canaryTools} {
+					if err := os.MkdirAll(directory, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				credentialMarker := filepath.Join(base, "credential-called")
+				captureMarker := filepath.Join(base, "capture-called")
+				osdMarker := filepath.Join(base, "osd-called")
+				credentialHelper := filepath.Join(canaryTools, "credential-canary")
+				writeExecutable(t, credentialHelper, "#!/bin/sh\n: > \"$MURMUR_CREDENTIAL_MARKER\"\nprintf token\n")
+				writeExecutable(t, filepath.Join(canaryTools, "pw-record"), "#!/bin/sh\n: > \"$MURMUR_CAPTURE_MARKER\"\nexit 1\n")
+				writeExecutable(t, filepath.Join(canaryTools, "murmur-osd"), "#!/bin/sh\n: > \"$MURMUR_OSD_MARKER\"\nexit 0\n")
+				writeInvalidPreflightConfig(t, filepath.Join(configDir, "config.toml"), server.URL, credentialHelper, kind)
+				env := replaceEnvironment(os.Environ(),
+					"PATH="+canaryTools+string(os.PathListSeparator)+tools+string(os.PathListSeparator)+os.Getenv("PATH"),
+					"XDG_CONFIG_HOME="+filepath.Join(base, "config"),
+					"XDG_RUNTIME_DIR="+runtimeBase,
+					"MURMUR_CREDENTIAL_MARKER="+credentialMarker,
+					"MURMUR_CAPTURE_MARKER="+captureMarker,
+					"MURMUR_OSD_MARKER="+osdMarker,
+				)
+				beforeRequests := providerCalls.Load()
+				for _, command := range [][]string{{"start"}, {"doctor", "--json"}} {
+					stdout, stderr, code := runSubprocess(t, env, nil, binaryPath, command...)
+					if code != 1 {
+						t.Fatalf("%v code=%d stdout=%q stderr=%q", command, code, stdout, stderr)
+					}
+				}
+				for _, marker := range []string{credentialMarker, captureMarker, osdMarker} {
+					if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("external canary %s was executed: %v", marker, err)
+					}
+				}
+				if providerCalls.Load() != beforeRequests {
+					t.Fatalf("network requests before rejection: %d", providerCalls.Load()-beforeRequests)
+				}
+				if _, err := os.Stat(filepath.Join(runtimeBase, "murmur")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("runtime created before rejection: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("detached UI outages are retained without sensitive canaries", func(t *testing.T) {
+		const (
+			transcriptCanary = "MURMUR-LOG-TRANSCRIPT-CANARY"
+			promptCanary     = "MURMUR-LOG-PROMPT-CANARY"
+			bodyCanary       = "MURMUR-LOG-HTTP-BODY-CANARY"
+			secretCanary     = "MURMUR-LOG-SECRET-CANARY"
+			argCanary        = "MURMUR-LOG-ARGV-CANARY"
+			helperCanary     = "MURMUR-LOG-HELPER-CANARY"
+		)
+		outageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/audio/transcriptions"):
+				writeJSON(t, w, map[string]string{"text": transcriptCanary})
+			case strings.HasSuffix(r.URL.Path, "/chat/completions"):
+				http.Error(w, bodyCanary, http.StatusServiceUnavailable)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer outageServer.Close()
+		osdPath := filepath.Join(tools, helperCanary)
+		writeExecutable(t, osdPath, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q %q %q %q %q %q >&2\nexit 1\n",
+			transcriptCanary, promptCanary, bodyCanary, secretCanary, argCanary, helperCanary))
+
+		for _, test := range []struct {
+			name      string
+			uiMode    string
+			component string
+			finish    string
+		}{
+			{name: "osd", uiMode: "osd", component: "osd", finish: "stop"},
+			{name: "dbus", uiMode: "notify", component: "dbus", finish: "cancel"},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				base := t.TempDir()
+				configDir := filepath.Join(base, "config", "murmur")
+				runtimeBase, err := os.MkdirTemp("", "mur27-")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
+				if err := os.MkdirAll(configDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(runtimeBase, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				outputFile := filepath.Join(base, "delivered.txt")
+				uiHelper := helperCanary
+				if test.uiMode == "osd" {
+					uiHelper = osdPath
+				}
+				writeOperationalLogConfig(t, filepath.Join(configDir, "config.toml"), outageServer.URL, outputFile, test.uiMode, promptCanary, argCanary, uiHelper)
+				env := replaceEnvironment(os.Environ(),
+					"PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"),
+					"XDG_CONFIG_HOME="+filepath.Join(base, "config"),
+					"XDG_RUNTIME_DIR="+runtimeBase,
+					"MURMUR_TEST_WAV="+fixture,
+					"MURMUR_LOG_SECRET="+secretCanary,
+					"DBUS_SESSION_BUS_ADDRESS=unix:path="+filepath.Join(base, "missing-"+helperCanary),
+				)
+				runtimeDir := filepath.Join(runtimeBase, "murmur")
+				runBinary(t, env, binaryPath, "start")
+				t.Cleanup(func() {
+					if _, err := os.Stat(filepath.Join(runtimeDir, "session.sock")); err == nil {
+						cmd := exec.Command(binaryPath, "cancel")
+						cmd.Env = env
+						_ = cmd.Run()
+					}
+				})
+				waitForActiveState(t, env, binaryPath)
+				runBinary(t, env, binaryPath, test.finish)
+				result := waitForProcessResult(t, runtimeDir, "")
+				if test.finish == "stop" && result.Result != session.Completed {
+					t.Fatalf("result=%#v", result)
+				}
+
+				entries, err := os.ReadDir(runtimeDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var operationalLog []byte
+				for _, entry := range entries {
+					if !strings.HasPrefix(entry.Name(), "murmur.log") {
+						continue
+					}
+					info, err := entry.Info()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if info.Mode().Perm() != 0o600 {
+						t.Fatalf("%s mode=%o", entry.Name(), info.Mode().Perm())
+					}
+					data, err := os.ReadFile(filepath.Join(runtimeDir, entry.Name()))
+					if err != nil {
+						t.Fatal(err)
+					}
+					operationalLog = append(operationalLog, data...)
+				}
+				if !bytes.Contains(operationalLog, []byte(`"component":"`+test.component+`"`)) {
+					t.Fatalf("%s outage missing from detached log: %s", test.name, operationalLog)
+				}
+				for _, canary := range []string{transcriptCanary, promptCanary, bodyCanary, secretCanary, argCanary, helperCanary} {
+					if bytes.Contains(operationalLog, []byte(canary)) {
+						t.Fatalf("sensitive canary %q leaked in %s", canary, operationalLog)
+					}
+				}
+			})
+		}
+	})
+
 	for _, command := range []string{"stop", "cancel"} {
 		t.Run(command, func(t *testing.T) {
 			before := providerCalls.Load()
@@ -800,7 +1283,7 @@ while :; do sleep 1; done
 			})
 			waitForActiveState(t, env, binaryPath)
 			runBinary(t, env, binaryPath, command)
-			result := waitForProcessResult(t, runtimeDir)
+			result := waitForProcessResult(t, runtimeDir, "")
 			if command == "stop" {
 				if result.Result != session.Completed || providerCalls.Load() != before+1 {
 					t.Fatalf("result=%#v provider calls before=%d after=%d", result, before, providerCalls.Load())
@@ -814,6 +1297,62 @@ while :; do sleep 1; done
 			}
 		})
 	}
+
+	t.Run("blocked delivery releases lock and socket", func(t *testing.T) {
+		base := t.TempDir()
+		configDir := filepath.Join(base, "config", "murmur")
+		if err := os.MkdirAll(configDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		runtimeBase, err := os.MkdirTemp("", "mur7-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
+		if err := os.Chmod(runtimeBase, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeBlockedDeliveryConfig(t, filepath.Join(configDir, "config.toml"), server.URL)
+		pidFile := filepath.Join(base, "blocked-delivery.pids")
+		writeExecutable(t, filepath.Join(tools, "wl-copy"), `#!/bin/sh
+trap '' HUP INT TERM
+/bin/sh -c 'trap "" HUP INT TERM; while :; do /bin/sleep 30; done' &
+printf '%s\n%s\n' "$$" "$!" > "$MURMUR_FAKE_PID"
+wait
+`)
+		env := replaceEnvironment(os.Environ(),
+			"PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"XDG_CONFIG_HOME="+filepath.Join(base, "config"),
+			"XDG_RUNTIME_DIR="+runtimeBase,
+			"MURMUR_TEST_WAV="+fixture,
+			"MURMUR_FAKE_PID="+pidFile,
+		)
+		runtimeDir := filepath.Join(runtimeBase, "murmur")
+		t.Cleanup(func() {
+			if _, err := os.Stat(filepath.Join(runtimeDir, "session.sock")); err == nil {
+				cmd := exec.Command(binaryPath, "cancel")
+				cmd.Env = env
+				_ = cmd.Run()
+			}
+		})
+
+		runBinary(t, env, binaryPath, "start")
+		waitForActiveState(t, env, binaryPath)
+		runBinary(t, env, binaryPath, "stop")
+		result := waitForProcessResult(t, runtimeDir, "")
+		if result.Result != session.Failed || result.Error == nil || result.Error.Class != errs.SinkFailed {
+			t.Fatalf("result=%#v", result)
+		}
+		assertProcessesGone(t, pidFile)
+
+		runBinary(t, env, binaryPath, "start")
+		waitForActiveState(t, env, binaryPath)
+		runBinary(t, env, binaryPath, "cancel")
+		result = waitForProcessResult(t, runtimeDir, result.SessionID)
+		if result.Result != session.Cancelled {
+			t.Fatalf("second session result=%#v", result)
+		}
+	})
 }
 
 func baseConfig(baseURL string) config.Config {
@@ -878,15 +1417,16 @@ func stopSession(t *testing.T, o *session.Orchestrator) (session.LastResult, err
 }
 
 type sessionOutcome struct {
-	result session.LastResult
-	err    error
+	result     session.LastResult
+	runErr     error
+	persistErr error
 }
 
 func runSession(o *session.Orchestrator) <-chan sessionOutcome {
 	done := make(chan sessionOutcome, 1)
 	go func() {
-		result, err := o.Run()
-		done <- sessionOutcome{result: result, err: err}
+		result, runErr, persistErr := o.Run()
+		done <- sessionOutcome{result: result, runErr: runErr, persistErr: persistErr}
 	}()
 	return done
 }
@@ -895,7 +1435,7 @@ func awaitSession(t *testing.T, done <-chan sessionOutcome) (session.LastResult,
 	t.Helper()
 	select {
 	case outcome := <-done:
-		return outcome.result, outcome.err
+		return outcome.result, errors.Join(outcome.runErr, outcome.persistErr)
 	case <-time.After(5 * time.Second):
 		t.Fatal("orchestrator did not terminate")
 		return session.LastResult{}, nil
@@ -1000,9 +1540,19 @@ func sampleSegmentIndex(t *testing.T, data []byte) int {
 	return -1
 }
 
-func containsString(values []string, wanted string) bool {
+func containsWarning(values []session.ResultWarning, wanted string) bool {
 	for _, value := range values {
-		if value == wanted {
+		if value.Message == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func hasClassifiedEvent(stream <-chan events.Event, kind events.Type, component string, class errs.Class) bool {
+	for len(stream) > 0 {
+		event := <-stream
+		if event.Type == kind && event.Component == component && event.ErrorClass == class {
 			return true
 		}
 	}
@@ -1107,13 +1657,167 @@ cleanup_zones = ["local"]
 mode = "file"
 clipboard_mode = "none"
 paste_shortcuts = ["ctrl+v"]
-type_newlines = "keep"
+type_newlines = "space"
 file = %q
 
 [ui]
 mode = "none"
 sound = false
 `, baseURL+"/v1", output)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeOperationalLogConfig(t *testing.T, path, baseURL, output, uiMode, prompt, audioArg, osdHelper string) {
+	t.Helper()
+	content := fmt.Sprintf(`[audio]
+source = %q
+
+[stt.providers.local]
+type = "openai-compatible"
+base_url = %q
+model = "test"
+language = "fr"
+prompt = %q
+timeout_s = 2
+zone = "local"
+api_key_env = "MURMUR_LOG_SECRET"
+
+[cleanup]
+enabled = true
+provider = "clean"
+prompt = %q
+
+[cleanup.providers.clean]
+type = "openai-compatible"
+base_url = %q
+model = "cleaner"
+timeout_s = 2
+zone = "local"
+
+[sink]
+mode = "file"
+clipboard_mode = "none"
+file = %q
+
+[ui]
+mode = %q
+
+[ui.osd]
+helper = %q
+
+[logging]
+level = "debug"
+max_bytes = 65536
+max_files = 2
+session_journal = false
+`, audioArg, baseURL+"/v1", prompt, prompt, baseURL+"/v1", output, uiMode, osdHelper)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeBlockedDeliveryConfig(t *testing.T, path, baseURL string) {
+	t.Helper()
+	content := fmt.Sprintf(`[general]
+profile = "local"
+command_pack = "fr"
+
+[stt]
+provider = "local"
+fallback = ""
+chunk_seconds = 0
+
+[stt.providers.local]
+type = "openai-compatible"
+base_url = %q
+model = "test"
+language = "fr"
+timeout_s = 2
+zone = "local"
+
+[cleanup]
+enabled = false
+
+[policy]
+stt_zones = ["local"]
+cleanup_zones = ["local"]
+
+[sink]
+mode = "clipboard"
+clipboard_mode = "clean-only"
+paste_shortcuts = ["ctrl+v"]
+type_newlines = "space"
+
+[ui]
+mode = "none"
+sound = false
+`, baseURL+"/v1")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeInvalidPreflightConfig(t *testing.T, path, baseURL, credentialHelper, kind string) {
+	t.Helper()
+	sttModel := "test"
+	cleanupModel := "cleaner"
+	shortcut := "ctrl+v"
+	sinkMode := "paste"
+	clipboardMode := "clean-only"
+	pluginTimeout := 2
+	switch kind {
+	case "stt-model":
+		sttModel = ""
+	case "cleanup-model":
+		cleanupModel = ""
+	case "shortcut":
+		shortcut = "super+v"
+	case "clipboard":
+		sinkMode = "clipboard"
+		clipboardMode = "none"
+	case "duration":
+		pluginTimeout = config.MaximumDurationSeconds + 1
+	default:
+		t.Fatalf("unknown invalid preflight kind %q", kind)
+	}
+	content := fmt.Sprintf(`[stt.providers.local]
+type = "openai-compatible"
+base_url = %q
+model = %q
+language = "fr"
+timeout_s = 2
+zone = "local"
+health_enabled = true
+health_endpoint = "/health"
+api_key_command = [%q]
+
+[cleanup]
+enabled = true
+provider = "clean"
+
+[cleanup.providers.clean]
+type = "openai-compatible"
+base_url = %q
+model = %q
+timeout_s = 2
+zone = "local"
+
+[plugin]
+timeout_s = %d
+
+[sink]
+mode = %q
+clipboard_mode = %q
+paste_shortcuts = [%q]
+
+[ui]
+mode = "osd"
+
+[ui.osd]
+helper = "murmur-osd"
+`, baseURL+"/v1", sttModel, credentialHelper, baseURL+"/v1", cleanupModel, pluginTimeout, sinkMode, clipboardMode, shortcut)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1253,14 +1957,64 @@ func waitForActiveState(t *testing.T, env []string, binary string) {
 	t.Fatal("binary session never reached recording")
 }
 
-func waitForProcessResult(t *testing.T, runtimeDir string) session.LastResult {
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("file did not appear: %s", path)
+}
+
+func pipeCapacity(t *testing.T, pipe *os.File) int {
+	t.Helper()
+	capacity, _, errno := syscall.Syscall(syscall.SYS_FCNTL, pipe.Fd(), syscall.F_GETPIPE_SZ, 0)
+	if errno != 0 {
+		t.Fatalf("read pipe capacity: %v", errno)
+	}
+	return int(capacity)
+}
+
+func assertProcessesGone(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range strings.Fields(string(data)) {
+		pid, err := strconv.Atoi(field)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			err = syscall.Kill(pid, 0)
+			if errors.Is(err, syscall.ESRCH) {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if !errors.Is(err, syscall.ESRCH) {
+			t.Fatalf("delivery process %d still exists: %v", pid, err)
+		}
+	}
+}
+
+func waitForProcessResult(t *testing.T, runtimeDir, previousSessionID string) session.LastResult {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		result, err := session.ReadLastResult(runtimeDir)
 		_, socketErr := os.Stat(filepath.Join(runtimeDir, "session.sock"))
-		if err == nil && errors.Is(socketErr, os.ErrNotExist) {
-			return result
+		if errors.Is(socketErr, os.ErrNotExist) {
+			result, err := session.ReadLastResult(runtimeDir)
+			if err == nil && result.SessionID != previousSessionID {
+				return result
+			}
+		} else if socketErr != nil {
+			t.Fatal(socketErr)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

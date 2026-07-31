@@ -43,10 +43,12 @@ type WavFile struct {
 // diagnostic store when retention was explicitly enabled.
 func (f WavFile) Release() (string, error) {
 	if f.cleanup == nil {
-		return "", nil
+		return "", f.File.Close()
 	}
 	f.cleanup.once.Do(func() {
+		closeErr := f.File.Close()
 		f.cleanup.diagnostic, f.cleanup.err = preserveOrRemove(f.Path(), f.cleanup.tempDir, f.cleanup.retention)
+		f.cleanup.err = errors.Join(closeErr, f.cleanup.err)
 	})
 	return f.cleanup.diagnostic, f.cleanup.err
 }
@@ -190,8 +192,9 @@ func (r *fakeRecording) Stop(ctx context.Context) (WavFile, error) {
 		return WavFile{}, errors.Join(err, cleanupErr)
 	}
 	if file.Duration() < r.opts.MinimumDuration {
+		closeErr := file.Close()
 		_, cleanupErr := preserveOrRemove(r.path, r.tempDir, r.opts.Retention)
-		return WavFile{}, errors.Join(errs.New(errs.NoSpeech, "audio/fake", "capture audio vide"), cleanupErr)
+		return WavFile{}, errors.Join(errs.New(errs.NoSpeech, "audio/fake", "capture audio vide"), closeErr, cleanupErr)
 	}
 	return newWavFile(file, r.tempDir, r.opts.Retention), nil
 }

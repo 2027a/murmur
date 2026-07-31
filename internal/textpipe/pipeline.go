@@ -7,20 +7,29 @@ import (
 	"fmt"
 	"strings"
 
+	"git.2027a.net/mathieu/murmur/internal/errs"
 	"git.2027a.net/mathieu/murmur/internal/plugin"
 )
 
 type Warning struct {
-	Stage   string `json:"stage"`
-	Message string `json:"message"`
+	Class     errs.Class `json:"class"`
+	Component string     `json:"component"`
+	Message   string     `json:"message"`
 }
+
+const (
+	warningCleanupDegraded = "cleanup dégradé: texte précédent conservé"
+	warningCleanupInvalid  = "cleanup dégradé: sortie invalide rejetée"
+	warningPluginDegraded  = "plugin dégradé: texte précédent conservé"
+	warningPluginInvalid   = "plugin dégradé: sortie invalide rejetée"
+)
 
 type Result struct {
 	Text     string    `json:"text"`
 	Warnings []Warning `json:"warnings,omitempty"`
 }
 
-// Text and Stage are the generic contract for optional future pipeline stages.
+// Text and Warning are the generic contract for optional future pipeline stages.
 type Text struct {
 	Content    string
 	Protection Protection
@@ -98,11 +107,11 @@ func (p *Pipeline) Run(ctx context.Context, transcript string) (Result, error) {
 		}
 		switch {
 		case cleanupErr != nil:
-			warnings = append(warnings, Warning{Stage: "cleanup", Message: cleanupErr.Error()})
+			warnings = append(warnings, Warning{Class: errs.Classify(cleanupErr), Component: "cleanup", Message: warningCleanupDegraded})
 		case candidate != "" && strings.TrimSpace(cleaned) == "":
-			warnings = append(warnings, Warning{Stage: "cleanup", Message: "cleanup returned empty text"})
+			warnings = append(warnings, Warning{Class: errs.EmptyResponse, Component: "cleanup", Message: warningCleanupInvalid})
 		case protected.Protection.Validate(cleaned) != nil:
-			warnings = append(warnings, Warning{Stage: "cleanup", Message: "cleanup altered protected commands"})
+			warnings = append(warnings, Warning{Class: errs.EmptyResponse, Component: "cleanup", Message: warningCleanupInvalid})
 		default:
 			candidate = cleaned
 		}
@@ -120,11 +129,11 @@ func (p *Pipeline) Run(ctx context.Context, transcript string) (Result, error) {
 		}
 		switch {
 		case pluginErr != nil:
-			warnings = append(warnings, Warning{Stage: "plugin", Message: pluginErr.Error()})
+			warnings = append(warnings, Warning{Class: errs.Classify(pluginErr), Component: "plugin", Message: warningPluginDegraded})
 		case rendered != "" && strings.TrimSpace(transformed) == "":
-			warnings = append(warnings, Warning{Stage: "plugin", Message: "plugin returned empty text"})
+			warnings = append(warnings, Warning{Class: errs.EmptyResponse, Component: "plugin", Message: warningPluginInvalid})
 		case strings.Contains(transformed, protected.Protection.Namespace):
-			warnings = append(warnings, Warning{Stage: "plugin", Message: "plugin returned a protected command token"})
+			warnings = append(warnings, Warning{Class: errs.EmptyResponse, Component: "plugin", Message: warningPluginInvalid})
 		default:
 			final = transformed
 		}

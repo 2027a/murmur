@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"git.2027a.net/mathieu/murmur/internal/audio"
 	"git.2027a.net/mathieu/murmur/internal/audio/wav"
 	"git.2027a.net/mathieu/murmur/internal/errs"
+	"git.2027a.net/mathieu/murmur/internal/stt"
 	"git.2027a.net/mathieu/murmur/internal/sysexec"
 )
 
@@ -183,6 +185,108 @@ func TestDoneReportsProcessDeathAfterReadiness(t *testing.T) {
 	}
 	_ = recording.Abort()
 	waitEmpty(t, root)
+}
+
+func TestStopAfterObservedProcessExitAlwaysFails(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		exitErr error
+	}{
+		{name: "exit zero"},
+		{name: "exit nonzero", exitErr: errors.New("pw-record exits 1")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			process := sysexec.NewFakeProcess()
+			executor := &sysexec.FakeExecutor{StartFunc: func(_ context.Context, _ string, args []string) (sysexec.Process, error) {
+				writeWAV(t, args[len(args)-1], 200*time.Millisecond)
+				return process, nil
+			}}
+			recording, err := New(executor).Start(context.Background(), audio.RecordOptions{
+				Directory: root, ReadinessInterval: time.Millisecond,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := receiveReady(t, recording.Ready()); err != nil {
+				t.Fatal(err)
+			}
+
+			process.Exit(test.exitErr)
+			awaitDone(t, recording.Done())
+			file, err := recording.Stop(context.Background())
+			if errs.Classify(err) != errs.AudioFailed {
+				t.Fatalf("Stop() error=%v", err)
+			}
+			if file.Path() != "" {
+				t.Fatalf("Stop() a exposé %q après une sortie spontanée", file.Path())
+			}
+			if signals := process.Signals(); len(signals) != 0 {
+				t.Fatalf("signaux après sortie observée=%v", signals)
+			}
+			waitEmpty(t, root)
+		})
+	}
+}
+
+func TestStopExitRaceUsesAtomicWinner(t *testing.T) {
+	for iteration := 0; iteration < 100; iteration++ {
+		root := t.TempDir()
+		process := sysexec.NewFakeProcess()
+		process.SignalFunc = func(os.Signal) error {
+			process.Exit(errors.New("exit after SIGINT"))
+			return nil
+		}
+		executor := &sysexec.FakeExecutor{StartFunc: func(_ context.Context, _ string, args []string) (sysexec.Process, error) {
+			writeWAV(t, args[len(args)-1], 200*time.Millisecond)
+			return process, nil
+		}}
+		recording, err := New(executor).Start(context.Background(), audio.RecordOptions{
+			Directory: root, ReadinessInterval: time.Millisecond,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := receiveReady(t, recording.Ready()); err != nil {
+			t.Fatal(err)
+		}
+
+		start := make(chan struct{})
+		type stopResult struct {
+			file audio.WavFile
+			err  error
+		}
+		stopped := make(chan stopResult, 1)
+		go func() {
+			<-start
+			file, err := recording.Stop(context.Background())
+			stopped <- stopResult{file: file, err: err}
+		}()
+		go func() {
+			<-start
+			process.Exit(errors.New("spontaneous exit"))
+		}()
+		close(start)
+		result := <-stopped
+
+		signals := process.Signals()
+		switch errs.Classify(result.err) {
+		case "":
+			if result.file.Path() == "" || len(signals) != 1 || signals[0] != os.Interrupt {
+				t.Fatalf("iteration %d: stop gagnant, file=%q signals=%v", iteration, result.file.Path(), signals)
+			}
+			if _, err := result.file.Release(); err != nil {
+				t.Fatal(err)
+			}
+		case errs.AudioFailed:
+			if result.file.Path() != "" || len(signals) != 0 {
+				t.Fatalf("iteration %d: sortie gagnante, file=%q signals=%v", iteration, result.file.Path(), signals)
+			}
+		default:
+			t.Fatalf("iteration %d: Stop() error=%v", iteration, result.err)
+		}
+		waitEmpty(t, root)
+	}
 }
 
 func TestReadinessTimeoutKillsProcess(t *testing.T) {
@@ -430,6 +534,194 @@ func TestLiveSingleProcessGrowingWAVHasExactPCMAndMergesTail(t *testing.T) {
 	waitEmpty(t, root)
 }
 
+func TestLiveStopSignalsBeforeBlockedSTTDrainsAndPreservesPCM(t *testing.T) {
+	root := t.TempDir()
+	const totalSamples = 160
+	const segmentSamples = 16
+	pcm := make([]byte, totalSamples*wav.BlockAlign)
+	for index := range totalSamples {
+		binary.LittleEndian.PutUint16(pcm[index*wav.BlockAlign:], uint16(index+1))
+	}
+
+	var path string
+	signaled := make(chan struct{})
+	process := sysexec.NewFakeProcess()
+	process.SignalFunc = func(signal os.Signal) error {
+		if signal != os.Interrupt {
+			return errors.New("signal inattendu")
+		}
+		close(signaled)
+		final, err := wav.FinalizeGrowing(path)
+		if err != nil {
+			return err
+		}
+		if err := final.Close(); err != nil {
+			return err
+		}
+		process.Exit(nil)
+		return nil
+	}
+	executor := &sysexec.FakeExecutor{StartFunc: func(_ context.Context, _ string, args []string) (sysexec.Process, error) {
+		path = args[len(args)-1]
+		if err := wav.CreateGrowing(path); err != nil {
+			return nil, err
+		}
+		if err := wav.AppendPCM(path, pcm[:wav.BlockAlign]); err != nil {
+			return nil, err
+		}
+		return process, nil
+	}}
+	recording, err := New(executor).StartLive(context.Background(), audio.RecordOptions{
+		Directory: root, ReadinessInterval: time.Millisecond, MinimumDuration: time.Millisecond,
+	}, audio.LiveOptions{SegmentDuration: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := receiveReady(t, recording.Ready()); err != nil {
+		t.Fatal(err)
+	}
+
+	gate := make(chan struct{})
+	provider := &blockedSTTProvider{gate: gate, entered: make(chan int, totalSamples/segmentSamples), files: make(map[int]wav.File)}
+	chain, err := stt.NewChain(provider, nil, stt.MultiOptions{Workers: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan stt.Segment)
+	forwarded := make(chan struct{})
+	go func() {
+		defer close(forwarded)
+		defer close(requests)
+		for segment := range recording.Segments() {
+			requests <- stt.Segment{Index: segment.Index, Request: stt.Request{
+				Audio: segment.File, Filename: filepath.Base(segment.File.Path()), Model: strconv.Itoa(segment.Index),
+			}}
+		}
+	}()
+	type transcriptionResult struct {
+		result stt.MultiResult
+		err    error
+	}
+	transcribed := make(chan transcriptionResult, 1)
+	go func() {
+		result, err := chain.TranscribeStream(context.Background(), requests, stt.Progress{})
+		transcribed <- transcriptionResult{result: result, err: err}
+	}()
+
+	if err := wav.AppendPCM(path, pcm[wav.BlockAlign:]); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case <-provider.entered:
+		case <-time.After(time.Second):
+			t.Fatal("workers STT non bloqués")
+		}
+	}
+	live := recording.(*liveRecording)
+	waitFor(t, func() bool { return len(live.parts) == cap(live.parts) })
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- recording.Stop(context.Background()) }()
+	select {
+	case <-signaled:
+	case <-time.After(time.Second):
+		t.Fatal("SIGINT bloqué par la file de segments pleine")
+	}
+	select {
+	case err := <-stopDone:
+		t.Fatalf("Stop a finalisé avant le drainage STT: %v", err)
+	default:
+	}
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	cancelWaiter()
+	if err := recording.Stop(waiterCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiter Stop()=%v", err)
+	}
+	select {
+	case err := <-stopDone:
+		t.Fatalf("le waiter a annulé le Stop propriétaire: %v", err)
+	default:
+	}
+	close(gate)
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stop non finalisé après drainage STT")
+	}
+	awaitDone(t, forwarded)
+
+	var outcome transcriptionResult
+	select {
+	case outcome = <-transcribed:
+	case <-time.After(time.Second):
+		t.Fatal("pool STT non terminé")
+	}
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	wantSegments := totalSamples / segmentSamples
+	if len(outcome.result.Segments) != wantSegments {
+		t.Fatalf("segments STT=%d, want %d", len(outcome.result.Segments), wantSegments)
+	}
+	provider.mu.Lock()
+	files := make(map[int]wav.File, len(provider.files))
+	for index, file := range provider.files {
+		files[index] = file
+	}
+	provider.mu.Unlock()
+	var joined []byte
+	for index, segment := range outcome.result.Segments {
+		if segment.Index != index {
+			t.Fatalf("segment[%d].Index=%d", index, segment.Index)
+		}
+		file, ok := files[index]
+		if !ok {
+			t.Fatalf("segment PCM %d absent", index)
+		}
+		joined = append(joined, readWAVData(t, file)...)
+	}
+	if !bytes.Equal(joined, pcm) {
+		t.Fatalf("PCM segmenté=%d octets, want %d", len(joined), len(pcm))
+	}
+	if signals := process.Signals(); len(signals) != 1 || signals[0] != os.Interrupt {
+		t.Fatalf("signaux=%v", signals)
+	}
+	if _, err := recording.Release(); err != nil {
+		t.Fatal(err)
+	}
+	waitEmpty(t, root)
+}
+
+type blockedSTTProvider struct {
+	gate    <-chan struct{}
+	entered chan int
+	mu      sync.Mutex
+	files   map[int]wav.File
+}
+
+func (p *blockedSTTProvider) Name() string { return "blocked" }
+
+func (p *blockedSTTProvider) Transcribe(ctx context.Context, request stt.Request) (stt.Result, error) {
+	index, err := strconv.Atoi(request.Model)
+	if err != nil {
+		return stt.Result{}, err
+	}
+	p.mu.Lock()
+	p.files[index] = request.Audio
+	p.mu.Unlock()
+	p.entered <- index
+	select {
+	case <-p.gate:
+		return stt.Result{Text: request.Model}, nil
+	case <-ctx.Done():
+		return stt.Result{}, ctx.Err()
+	}
+}
+
 func TestLiveAbortLeavesNoProcessOrCaptureWithRetention(t *testing.T) {
 	root := t.TempDir()
 	process := sysexec.NewFakeProcess()
@@ -468,6 +760,39 @@ func TestLiveAbortLeavesNoProcessOrCaptureWithRetention(t *testing.T) {
 		t.Fatalf("nombre de pw-record=%d", len(executor.Calls()))
 	}
 	waitEmpty(t, root)
+}
+
+func TestLiveAbortClosesFinalSnapshotAfterFinalizeError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "recording.wav")
+	writeWAV(t, path, 200*time.Millisecond)
+	file, err := wav.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := audio.NewWavFile(file, root, audio.RetentionOptions{})
+	segmenter, err := audio.NewGrowingSegmenter(filepath.Join(root, "other.wav"), root, audio.LiveOptions{
+		SegmentDuration: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	recording := &liveRecording{
+		segmenter: segmenter, tempDir: root, ctx: ctx, cancel: cancel,
+		parts: make(chan audio.LiveSegment, 1), done: make(chan struct{}),
+	}
+	if err := recording.finalize(liveCaptureResult{file: final}); err == nil {
+		t.Fatal("finalisation invalide acceptée")
+	}
+	close(recording.done)
+	if err := recording.Abort(); err != nil {
+		t.Fatal(err)
+	}
+	if _, handle, err := file.OpenRIFF(); err == nil {
+		handle.Close()
+		t.Fatal("snapshot final encore ouvert après Abort")
+	}
 }
 
 func TestLiveDoneReportsProcessDeathAfterReadiness(t *testing.T) {

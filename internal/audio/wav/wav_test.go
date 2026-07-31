@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -33,6 +34,114 @@ func TestOpenUnknownChunksPaddingAndDuration(t *testing.T) {
 	}
 	if got := readAudio(t, file); !bytes.Equal(got, audio) {
 		t.Fatal("les données audio diffèrent")
+	}
+}
+
+func TestOpenPinsValidatedRIFFAndExcludesPhysicalSuffix(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "source.wav")
+	validated := riff(chunk("fmt ", pcmFormat()), chunk("data", samples(16)))
+	writeFile(t, path, append(append([]byte(nil), validated...), []byte("CANARY-SUFFIX")...))
+
+	file, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	replaced := filepath.Join(dir, "validated.wav")
+	if err := os.Rename(path, replaced); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, []byte("replacement must not be read"))
+
+	reader, handle, err := file.OpenRIFF()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, readErr := io.ReadAll(reader)
+	closeErr := handle.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("lecture RIFF: read=%v close=%v", readErr, closeErr)
+	}
+	if !bytes.Equal(got, validated) {
+		t.Fatalf("RIFF lu=%d octets, attendu=%d", len(got), len(validated))
+	}
+}
+
+func TestOpenSnapshotsBytesBeforeInPlaceMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.wav")
+	original := riff(chunk("fmt ", pcmFormat()), chunk("data", samples(16)))
+	writeFile(t, path, original)
+	file, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	mutated := append([]byte(nil), original...)
+	copy(mutated[len(mutated)-16:], bytes.Repeat([]byte{0xff}, 16))
+	handle, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := handle.WriteAt(mutated, 0)
+	closeErr := handle.Close()
+	if writeErr != nil || closeErr != nil {
+		t.Fatalf("mutation source: write=%v close=%v", writeErr, closeErr)
+	}
+
+	reader, snapshot, err := file.OpenRIFF()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, readErr := io.ReadAll(reader)
+	if _, err := snapshot.WriteAt([]byte{'X'}, 0); err == nil {
+		t.Fatal("snapshot WAV modifiable malgré les seals")
+	}
+	closeErr = snapshot.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("lecture snapshot: read=%v close=%v", readErr, closeErr)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatal("une mutation in-place a modifié le snapshot validé")
+	}
+}
+
+func TestOpenFileTypePolicy(t *testing.T) {
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "regular.wav")
+	writeFile(t, regular, riff(chunk("fmt ", pcmFormat()), chunk("data", samples(1))))
+
+	parentLink := filepath.Join(dir, "parent-link")
+	if err := os.Symlink(dir, parentLink); err != nil {
+		t.Fatal(err)
+	}
+	file, err := Open(filepath.Join(parentLink, "regular.wav"))
+	if err != nil {
+		t.Fatalf("symlink de répertoire parent refusé: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	finalLink := filepath.Join(dir, "final-link.wav")
+	if err := os.Symlink(regular, finalLink); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(dir, "audio.fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{
+		"final symlink": finalLink,
+		"fifo":          fifo,
+		"device":        "/dev/null",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Open(path); err == nil || errs.Classify(err) != errs.AudioFailed {
+				t.Fatalf("Open(%q) error=%v", path, err)
+			}
+		})
 	}
 }
 
@@ -127,6 +236,34 @@ func TestGrowingSnapshotUsesOnlyCompletePhysicalSamples(t *testing.T) {
 	}
 	if final.Samples() != 2 || !bytes.Equal(readAudio(t, final), []byte{1, 2, 3, 4}) {
 		t.Fatalf("WAV final: samples=%d data=%v", final.Samples(), readAudio(t, final))
+	}
+}
+
+func TestFinalizeGrowingReturnsSnapshotOfStableDescriptor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "growing.wav")
+	if err := CreateGrowing(path); err != nil {
+		t.Fatal(err)
+	}
+	want := samples(32)
+	if err := AppendPCM(path, want); err != nil {
+		t.Fatal(err)
+	}
+	final, err := FinalizeGrowing(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer final.Close()
+	handle, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := handle.WriteAt(bytes.Repeat([]byte{0xff}, len(want)), headerSize)
+	closeErr := handle.Close()
+	if writeErr != nil || closeErr != nil {
+		t.Fatalf("mutation finale: write=%v close=%v", writeErr, closeErr)
+	}
+	if got := readAudio(t, final); !bytes.Equal(got, want) {
+		t.Fatal("le WAV final dépend encore du chemin mutable")
 	}
 }
 
@@ -273,6 +410,24 @@ func readAudio(t *testing.T, file File) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestCloseInvalidatesAllFileCopies(t *testing.T) {
+	file, err := Open(makeWAV(t, time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy := file
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := copy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, handle, err := copy.OpenRIFF(); err == nil {
+		handle.Close()
+		t.Fatal("une copie fermée expose encore la source")
+	}
 }
 
 func durations(files []File) []time.Duration {

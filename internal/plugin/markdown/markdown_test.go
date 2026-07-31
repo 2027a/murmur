@@ -80,7 +80,7 @@ func TestInvalidFixturesFallBackWithoutTechnicalTokens(t *testing.T) {
 			if result.Text != test.Expected {
 				t.Fatalf("Run() = %q, want %q", result.Text, test.Expected)
 			}
-			if len(result.Warnings) != 1 || result.Warnings[0].Stage != "plugin" {
+			if len(result.Warnings) != 1 || result.Warnings[0].Component != "plugin" {
 				t.Fatalf("warnings = %#v", result.Warnings)
 			}
 			if strings.Contains(result.Text, "MURMUR_CMD") || strings.Contains(result.Text, "__WQ_") {

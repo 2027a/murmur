@@ -4,12 +4,15 @@ profile = "local"
 [stt]
 provider = "local"
 # Le chemin historique reste actif: live_chunking=false et chunk_seconds=0.
+# Limites implicites: max_text_bytes=16777216 et max_segments=4096;
+# maxima: chunk_seconds=86400, max_text_bytes=67108864, max_segments=65536.
 
 [stt.providers.local]
 type = "openai-compatible"
 base_url = "http://127.0.0.1:8000/v1"
 model = "large-v3"
 language = "fr"
+# Tous les timeout_s configurables sont bornés à 86400 s.
 timeout_s = 120
 zone = "local"
 

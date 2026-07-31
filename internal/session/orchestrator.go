@@ -20,7 +20,7 @@ import (
 )
 
 type Transcriber interface {
-	TranscribeSegments(context.Context, []stt.Segment) (stt.MultiResult, error)
+	TranscribeSegments(context.Context, []stt.Segment, stt.Progress) (stt.MultiResult, error)
 }
 
 type LiveTranscriber interface {
@@ -75,6 +75,7 @@ type Orchestrator struct {
 	metadataMu sync.Mutex
 	runResult  LastResult
 	runErr     error
+	persistErr error
 }
 
 type eventPublisher struct {
@@ -149,7 +150,9 @@ func (o *Orchestrator) Begin() error {
 	return o.beginErr
 }
 
-func (o *Orchestrator) Run() (LastResult, error) {
+// Run keeps execution and persistence failures separate so callers cannot
+// commit a terminal result after any failed write.
+func (o *Orchestrator) Run() (LastResult, error, error) {
 	o.runOnce.Do(func() {
 		defer close(o.runDone)
 		defer o.ui.Close()
@@ -161,12 +164,10 @@ func (o *Orchestrator) Run() (LastResult, error) {
 			o.runErr = o.run()
 		}
 		o.runResult = o.finalResult(o.runErr)
-		if err := WriteLastResult(o.runtimeDir, o.runResult); err != nil {
-			o.runErr = errors.Join(o.runErr, err)
-		}
+		o.persistErr = WriteLastResult(o.runtimeDir, o.runResult)
 	})
 	<-o.runDone
-	return o.runResult, o.runErr
+	return o.runResult, o.runErr, o.persistErr
 }
 
 func (o *Orchestrator) run() error {
@@ -310,23 +311,24 @@ func (o *Orchestrator) runLive() error {
 	}
 	transcribed := make(chan transcriptionOutcome, 1)
 	go func() {
-		result, err := transcriber.TranscribeStream(o.ctx, requests, stt.Progress{
-			Started: func(index int, provider string) {
-				o.publish(events.PartialStarted, provider, "", "stt", index+1, 0)
-			},
-			Done: func(index int, provider string) {
-				o.publish(events.PartialDone, provider, "", "stt", index+1, 0)
-			},
-			Failed: func(index int, provider string, class errs.Class) {
-				o.publish(events.PartialFailed, provider, class, "stt", index+1, 0)
-			},
-		})
+		result, err := transcriber.TranscribeStream(o.ctx, requests, o.transcriptionProgress(0))
 		transcribed <- transcriptionOutcome{result: result, err: err}
 	}()
 
 	if o.machine.State() == Recording {
 		select {
 		case <-o.stop:
+		case outcome := <-transcribed:
+			if stt.IsLimitExceeded(outcome.err) {
+				o.cancelOps()
+				abortErr := recording.Abort()
+				<-forwarded
+				return o.fail(errors.Join(outcome.err, abortErr))
+			}
+			err := audioRecordingFailure(recording.Err())
+			_ = recording.Abort()
+			<-forwarded
+			return o.fail(errors.Join(err, outcome.err))
 		case <-recording.Done():
 			if o.machine.Result() != "" {
 				_ = recording.Abort()
@@ -382,9 +384,6 @@ func (o *Orchestrator) runLive() error {
 		})
 	}
 	provider := outcome.result.Provider
-	if provider == "" && len(outcome.result.Segments) > 0 {
-		provider = outcome.result.Segments[len(outcome.result.Segments)-1].Provider
-	}
 	if outcome.err == nil {
 		o.publish(events.ProviderSelected, provider, "", "", 0, 0)
 	}
@@ -406,10 +405,35 @@ func (o *Orchestrator) completeTranscript(transcript, provider string, warnings 
 	}
 	o.setProvider(provider)
 	for _, warning := range warnings {
-		o.addWarning(warning.Message)
+		o.addWarning(ResultWarning{
+			Class: warning.Class, Provider: warning.Provider, Component: warning.Component, Message: warning.Message,
+		})
 		o.publish(events.Degraded, warning.Provider, warning.Class, warning.Component, 0, 0)
 	}
 	if err := o.machine.Apply(TranscriptionDoneCommand); err != nil {
+		if o.machine.Result() != "" {
+			return nil
+		}
+		return o.fail(err)
+	}
+	processed, err := o.processor.Run(o.ctx, transcript)
+	if err != nil {
+		if o.machine.Result() != "" {
+			return nil
+		}
+		return o.fail(err)
+	}
+	for _, warning := range processed.Warnings {
+		o.addWarning(ResultWarning{
+			Class: warning.Class, Provider: provider, Component: warning.Component, Message: warning.Message,
+		})
+		o.publish(events.Degraded, provider, warning.Class, warning.Component, 0, 0)
+	}
+	if strings.TrimSpace(processed.Text) == "" {
+		_ = o.machine.ApplyTerminal(NoSpeechCommand, provider, errs.NoSpeech)
+		return nil
+	}
+	if err := o.machine.Apply(ProcessingDoneCommand); err != nil {
 		if o.machine.Result() != "" {
 			return nil
 		}
@@ -422,28 +446,6 @@ func (o *Orchestrator) completeTranscript(transcript, provider string, warnings 
 			return o.fail(err)
 		}
 	}
-
-	processed, err := o.processor.Run(o.ctx, transcript)
-	if err != nil {
-		if o.machine.Result() != "" {
-			return nil
-		}
-		return o.fail(err)
-	}
-	for _, warning := range processed.Warnings {
-		o.addWarning(warning.Stage + ": " + warning.Message)
-		o.publish(events.Degraded, provider, errs.Internal, warning.Stage, 0, 0)
-	}
-	if strings.TrimSpace(processed.Text) == "" {
-		_ = o.machine.ApplyTerminal(NoSpeechCommand, provider, errs.NoSpeech)
-		return nil
-	}
-	if err := o.machine.Apply(ProcessingDoneCommand); err != nil {
-		if o.machine.Result() != "" {
-			return nil
-		}
-		return o.fail(err)
-	}
 	if err := o.sink.Deliver(o.ctx, processed.Text); err != nil {
 		return o.fail(err)
 	}
@@ -455,6 +457,19 @@ func (o *Orchestrator) completeTranscript(transcript, provider string, warnings 
 }
 
 func (o *Orchestrator) transcribe(file audio.WavFile) (string, string, []stt.Warning, error) {
+	if o.chunk > 0 {
+		count, err := file.File.SegmentCount(o.chunk, time.Second)
+		if err != nil {
+			_, cleanupErr := file.Release()
+			return "", "", nil, errors.Join(err, cleanupErr)
+		}
+		if limiter, ok := o.transcriber.(interface{ ValidateSegmentCount(int) error }); ok {
+			if err := limiter.ValidateSegmentCount(count); err != nil {
+				_, cleanupErr := file.Release()
+				return "", "", nil, errors.Join(err, cleanupErr)
+			}
+		}
+	}
 	segments, err := audio.Chunk(file.File, audio.ChunkOptions{
 		Duration: o.chunk, MinTail: time.Second, OutputDir: filepath.Dir(file.Path()),
 	})
@@ -467,29 +482,35 @@ func (o *Orchestrator) transcribe(file audio.WavFile) (string, string, []stt.War
 		requests[i] = stt.Segment{Index: segment.Index, Request: stt.Request{
 			Audio: segment.File, Filename: filepath.Base(segment.File.Path()),
 		}}
-		o.publish(events.PartialStarted, "", "", "", i+1, len(segments))
 	}
-	result, err := o.transcriber.TranscribeSegments(o.ctx, requests)
+	result, err := o.transcriber.TranscribeSegments(o.ctx, requests, o.transcriptionProgress(len(segments)))
 	segmentErr := audio.RemoveSegments(segments)
 	_, releaseErr := file.Release()
 	cleanupErr := errors.Join(segmentErr, releaseErr)
 	if err != nil {
-		o.publish(events.PartialFailed, stt.ProviderFromError(err), errs.Classify(err), "stt", 0, len(segments))
 		return "", "", nil, errors.Join(err, cleanupErr)
 	}
-	for i, segment := range result.Segments {
-		o.publish(events.PartialDone, segment.Provider, "", "", i+1, len(segments))
-	}
 	provider := result.Provider
-	if provider == "" && len(result.Segments) > 0 {
-		provider = result.Segments[len(result.Segments)-1].Provider
-	}
 	o.publish(events.ProviderSelected, provider, "", "", 0, 0)
 	warnings := append([]stt.Warning(nil), result.Warnings...)
 	if cleanupErr != nil {
 		warnings = append(warnings, stt.Warning{Class: errs.AudioFailed, Provider: provider, Component: "audio", Message: "nettoyage audio dégradé"})
 	}
 	return result.Text, provider, warnings, nil
+}
+
+func (o *Orchestrator) transcriptionProgress(total int) stt.Progress {
+	return stt.Progress{
+		Started: func(index int, provider string) {
+			o.publish(events.PartialStarted, provider, "", "stt", index+1, total)
+		},
+		Done: func(index int, provider string) {
+			o.publish(events.PartialDone, provider, "", "stt", index+1, total)
+		},
+		Failed: func(index int, provider string, class errs.Class) {
+			o.publish(events.PartialFailed, provider, class, "stt", index+1, total)
+		},
+	}
 }
 
 func (o *Orchestrator) Handle(_ context.Context, request ipc.Request) ipc.Response {
@@ -585,16 +606,16 @@ func (o *Orchestrator) currentProvider() string {
 	return o.runResult.Provider
 }
 
-func (o *Orchestrator) addWarning(warning string) {
+func (o *Orchestrator) addWarning(warning ResultWarning) {
 	o.metadataMu.Lock()
 	o.runResult.Warnings = append(o.runResult.Warnings, warning)
 	o.metadataMu.Unlock()
 }
 
-func (o *Orchestrator) metadata() (string, []string) {
+func (o *Orchestrator) metadata() (string, []ResultWarning) {
 	o.metadataMu.Lock()
 	defer o.metadataMu.Unlock()
-	return o.runResult.Provider, append([]string(nil), o.runResult.Warnings...)
+	return o.runResult.Provider, append([]ResultWarning(nil), o.runResult.Warnings...)
 }
 
 func resultError(err error) *ResultError {

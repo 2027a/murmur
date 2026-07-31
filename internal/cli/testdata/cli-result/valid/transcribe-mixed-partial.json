@@ -1,0 +1,42 @@
+{
+  "v": 1,
+  "command": "transcribe",
+  "success": true,
+  "provider": "mixed",
+  "model": "",
+  "language": "",
+  "transcript_raw": "principal secours",
+  "transcript_final": "Principal secours.",
+  "segment_count": 2,
+  "segments": [
+    {
+      "index": 0,
+      "provider": "primary",
+      "model": "large-v3",
+      "language": "fr",
+      "transcript": "principal"
+    },
+    {
+      "index": 2,
+      "provider": "fallback",
+      "model": "small-fr",
+      "language": "fr",
+      "transcript": "secours"
+    }
+  ],
+  "warnings": [
+    {
+      "class": "server_error",
+      "provider": "primary",
+      "component": "stt",
+      "message": "fallback STT utilisé"
+    },
+    {
+      "class": "unavailable",
+      "provider": "",
+      "component": "stt",
+      "message": "transcription mixte"
+    }
+  ],
+  "error": null
+}

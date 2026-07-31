@@ -41,8 +41,11 @@ type Dependencies struct {
 	Providers       ProviderChecker
 	Source          SourceChecker
 	OSDHelper       string
+	ExternalTimeout time.Duration
 	TrustedNetworks []netip.Prefix
 }
+
+const DefaultExternalCheckTimeout = 5 * time.Second
 
 func Run(ctx context.Context, cfg config.Config, dependencies Dependencies) Report {
 	d := withDefaults(cfg, dependencies)
@@ -64,12 +67,19 @@ func Run(ctx context.Context, cfg config.Config, dependencies Dependencies) Repo
 	add("configuration et policy", nil)
 	add("repertoire runtime", d.Runtime())
 	addTool(&report, d.LookPath, "capture: pw-record", "pw-record")
-	add("source audio", d.Source.Check(ctx, cfg.Audio.Source))
+	add("source audio", timedCheck(ctx, d.ExternalTimeout, func(checkCtx context.Context) error {
+		return d.Source.Check(checkCtx, cfg.Audio.Source)
+	}))
 
 	for _, provider := range requiredProviders(cfg) {
 		secret := ""
 		if hasSecretSource(provider.credentials) {
-			resolved, err := d.Secrets.ResolveCredentials(ctx, provider.credentials)
+			var resolved string
+			err := timedCheck(ctx, d.ExternalTimeout, func(checkCtx context.Context) error {
+				var err error
+				resolved, err = d.Secrets.ResolveCredentials(checkCtx, provider.credentials)
+				return err
+			})
 			add("credential "+provider.label, err)
 			if err != nil {
 				report.Checks = append(report.Checks, Check{
@@ -87,7 +97,9 @@ func Run(ctx context.Context, cfg config.Config, dependencies Dependencies) Repo
 			})
 			continue
 		}
-		add("sante "+provider.label, d.Providers.Check(ctx, provider.name, *provider.health, secret))
+		add("sante "+provider.label, timedCheck(ctx, d.ExternalTimeout, func(checkCtx context.Context) error {
+			return d.Providers.Check(checkCtx, provider.name, *provider.health, secret)
+		}))
 	}
 
 	for _, tool := range sinkTools(cfg) {
@@ -99,7 +111,7 @@ func Run(ctx context.Context, cfg config.Config, dependencies Dependencies) Repo
 
 	switch cfg.UI.Mode {
 	case "notify":
-		add("UI notifications D-Bus", d.Notifications(ctx))
+		add("UI notifications D-Bus", timedCheck(ctx, d.ExternalTimeout, d.Notifications))
 	case "osd":
 		helper := cfg.UI.OSD.Helper
 		if d.OSDHelper != "" {
@@ -108,7 +120,10 @@ func Run(ctx context.Context, cfg config.Config, dependencies Dependencies) Repo
 		if _, err := d.LookPath(helper); err != nil {
 			add("UI helper OSD", fmt.Errorf("%s introuvable", helper))
 		} else {
-			_, err := d.Executor.Run(ctx, helper, []string{"--check"}, nil)
+			err := timedCheck(ctx, d.ExternalTimeout, func(checkCtx context.Context) error {
+				_, err := d.Executor.Run(checkCtx, helper, []string{"--check"}, nil)
+				return err
+			})
 			add("UI helper OSD", err)
 		}
 	}
@@ -116,6 +131,16 @@ func Run(ctx context.Context, cfg config.Config, dependencies Dependencies) Repo
 		addAnyTool(&report, d.LookPath, "UI son", []string{"pw-play", "paplay", "canberra-gtk-play"})
 	}
 	return report
+}
+
+func timedCheck(ctx context.Context, timeout time.Duration, check func(context.Context) error) error {
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	err := check(checkCtx)
+	if checkCtx.Err() != nil {
+		return checkCtx.Err()
+	}
+	return err
 }
 
 type requiredProvider struct {
@@ -218,10 +243,11 @@ func withDefaults(cfg config.Config, d Dependencies) Dependencies {
 	if d.Notifications == nil {
 		d.Notifications = ui.CheckDesktopNotifications
 	}
+	if d.ExternalTimeout <= 0 {
+		d.ExternalTimeout = DefaultExternalCheckTimeout
+	}
 	if d.Executor == nil {
-		d.Executor = sysexec.OSExecutor{
-			Env: sysexec.FilterEnvironment(environment, config.APIKeyEnvironmentNames(cfg)),
-		}
+		d.Executor = sysexec.OSExecutor{Env: config.CredentialHelperEnvironment(cfg, environment)}
 	}
 	if d.Secrets == nil {
 		secretExecutor := d.SecretExecutor
@@ -229,7 +255,7 @@ func withDefaults(cfg config.Config, d Dependencies) Dependencies {
 			if executorInjected {
 				secretExecutor = d.Executor
 			} else {
-				secretExecutor = sysexec.OSExecutor{Env: environment}
+				secretExecutor = sysexec.OSExecutor{Env: config.CredentialHelperEnvironment(cfg, environment)}
 			}
 		}
 		d.Secrets = config.SecretResolver{Runner: secretRunner{executor: secretExecutor}}
@@ -274,11 +300,6 @@ type httpProviderChecker struct {
 }
 
 func (c httpProviderChecker) Check(ctx context.Context, _ string, provider config.ProviderConfig, secret string) error {
-	timeout := time.Duration(provider.TimeoutS) * time.Second
-	if timeout > 5*time.Second {
-		timeout = 5 * time.Second
-	}
-	provider.TimeoutS = int(timeout / time.Second)
 	checker, err := core.NewSTTProvider("doctor", provider, secret, c.trusted)
 	if err != nil {
 		return err

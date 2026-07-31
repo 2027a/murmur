@@ -10,9 +10,13 @@ keep_recordings = false
 [stt]
 provider = "speaches"
 fallback = "openai"
+# Bornes: chunk_seconds <= 86400, max_text_bytes <= 67108864,
+# max_segments <= 65536.
 chunk_seconds = 0
 live_chunking = false
 chunk_workers = 2
+max_text_bytes = 16777216
+max_segments = 4096
 allow_partial = false
 allow_mixed_providers = false
 
@@ -75,7 +79,7 @@ mode = "paste"
 auto_mode = "paste"
 clipboard_mode = "clean-only"
 paste_shortcuts = ["ctrl+shift+v", "shift+insert", "ctrl+v"]
-type_newlines = "keep"
+type_newlines = "space"
 file = ""
 
 [ui]
@@ -85,11 +89,16 @@ sound = false
 [ui.osd]
 helper = "murmur-osd"
 position = "top-center"
+# Délais configurables bornés à 86400000 ms (24 h).
 success_timeout_ms = 2500
 error_timeout_ms = 4000
 
 [logging]
 level = "info"
+# Log opérationnel JSONL: de 1024 à 16777216 octets et de 1 à 10 fichiers.
+max_bytes = 1048576
+max_files = 3
 session_journal = true
+# De 1024 à 1073741824 octets; session_max_files reste de 1 à 100.
 session_max_bytes = 1048576
 session_max_files = 3

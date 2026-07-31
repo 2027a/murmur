@@ -1,8 +1,10 @@
 package cleanup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -79,6 +81,13 @@ func TestCleanupRejectsAmbiguousBaseURL(t *testing.T) {
 	}
 }
 
+func TestCleanupRejectsEmptyModel(t *testing.T) {
+	_, err := NewOpenAICompatible(Config{BaseURL: "http://127.0.0.1/v1", Timeout: time.Second})
+	if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), "modèle") {
+		t.Fatalf("constructor error = %v", err)
+	}
+}
+
 func TestCleanupGuardsFallbackToInput(t *testing.T) {
 	input := "bonjour " + tokenOpen + " monde " + tokenClose
 	for _, test := range []struct {
@@ -115,6 +124,7 @@ func TestCleanupHTTPTimeoutCancelEmptyLarge(t *testing.T) {
 	}{
 		{"auth", http.StatusUnauthorized, `{}`, errs.AuthFailed},
 		{"server", http.StatusInternalServerError, `{}`, errs.ServerError},
+		{"invalid json", http.StatusOK, `{`, errs.ServerError},
 		{"empty choices", http.StatusOK, `{"choices":[]}`, errs.EmptyResponse},
 		{"large", http.StatusOK, strings.Repeat("x", maxResponseBytes+1), errs.ServerError},
 	} {
@@ -145,6 +155,61 @@ func TestCleanupHTTPTimeoutCancelEmptyLarge(t *testing.T) {
 	client = newCleanupClient(t, Config{BaseURL: blocking.URL, Timeout: time.Second, AllowedZone: policy.Local})
 	if result := client.Clean(ctx, "input"); errs.Classify(result.Degraded) != errs.Cancelled {
 		t.Fatalf("cancel result = %#v", result)
+	}
+}
+
+func TestCleanupNon2xxStatusPrecedesBodyErrors(t *testing.T) {
+	largeBody := []byte(responseCanary + strings.Repeat("x", maxResponseBytes+1))
+	statuses := []struct {
+		name   string
+		status int
+		want   errs.Class
+	}{
+		{"unauthorized", http.StatusUnauthorized, errs.AuthFailed},
+		{"forbidden", http.StatusForbidden, errs.AuthFailed},
+		{"request timeout", http.StatusRequestTimeout, errs.Timeout},
+		{"rate limited", http.StatusTooManyRequests, errs.Unavailable},
+		{"server error", http.StatusServiceUnavailable, errs.ServerError},
+	}
+	bodies := []struct {
+		name     string
+		wantRead int64
+		new      func() *trackedResponseBody
+	}{
+		{"over limit", maxResponseBytes, func() *trackedResponseBody {
+			return &trackedResponseBody{reader: bytes.NewReader(largeBody)}
+		}},
+		{"unreadable", 0, func() *trackedResponseBody {
+			return &trackedResponseBody{reader: errorReader{err: errors.New(responseCanary)}}
+		}},
+	}
+
+	for _, status := range statuses {
+		for _, bodyTest := range bodies {
+			t.Run(status.name+"/"+bodyTest.name, func(t *testing.T) {
+				body := bodyTest.new()
+				client := newCleanupClient(t, Config{
+					BaseURL: "http://127.0.0.1", Timeout: time.Second, AllowedZone: policy.Local,
+				})
+				client.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: status.status, Header: make(http.Header), Body: body}, nil
+				})
+
+				result := client.Clean(context.Background(), "input")
+				if got := errs.Classify(result.Degraded); got != status.want {
+					t.Fatalf("class = %s, want %s: %v", got, status.want, result.Degraded)
+				}
+				if strings.Contains(result.Degraded.Error(), responseCanary) || strings.Contains(strings.Join(result.Warnings, " "), responseCanary) {
+					t.Fatalf("response body leaked in result: %#v", result)
+				}
+				if !body.closed {
+					t.Fatal("response body was not closed")
+				}
+				if body.read != bodyTest.wantRead {
+					t.Fatalf("drained %d bytes, want %d", body.read, bodyTest.wantRead)
+				}
+			})
+		}
 	}
 }
 
@@ -183,9 +248,45 @@ func cleanupServer(t *testing.T, output string, status int) *httptest.Server {
 
 func newCleanupClient(t *testing.T, config Config) *Client {
 	t.Helper()
+	if config.Model == "" {
+		config.Model = "cleaner"
+	}
 	client, err := NewOpenAICompatible(config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return client
+}
+
+const responseCanary = "MURMUR_RESPONSE_BODY_CANARY"
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type trackedResponseBody struct {
+	reader io.Reader
+	read   int64
+	closed bool
+}
+
+func (b *trackedResponseBody) Read(buffer []byte) (int, error) {
+	n, err := b.reader.Read(buffer)
+	b.read += int64(n)
+	return n, err
+}
+
+func (b *trackedResponseBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read([]byte) (int, error) {
+	return 0, r.err
 }

@@ -3,6 +3,7 @@ package sink
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"git.2027a.net/mathieu/murmur/internal/config"
 	"git.2027a.net/mathieu/murmur/internal/errs"
@@ -75,10 +77,176 @@ func TestTypeSinkWithoutClipboard(t *testing.T) {
 	if err := delivery.Deliver(context.Background(), "one\ntwo"); err != nil {
 		t.Fatal(err)
 	}
-	want := []call{{name: "wtype", args: []string{"-"}, stdin: "one\ntwo"}}
+	want := []call{{name: "wtype", args: []string{"-"}, stdin: "one two"}}
 	if !reflect.DeepEqual(executor.calls, want) {
 		t.Fatalf("calls = %#v, want %#v", executor.calls, want)
 	}
+}
+
+func TestActiveSinksSanitizeProviderText(t *testing.T) {
+	const input = "a\r\nb\nc\rd\te\x1bf\x00g\x7fh\u0085i\u009fjé🙂"
+	const safe = "a b c d efghijé🙂"
+
+	t.Run("type clipboard and wtype", func(t *testing.T) {
+		executor := &fakeExecutor{}
+		delivery, err := New(sinkConfig("type", "clean-only"), Options{Executor: executor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := delivery.Deliver(context.Background(), input); err != nil {
+			t.Fatal(err)
+		}
+		want := []call{
+			{name: "wl-copy", stdin: safe},
+			{name: "wtype", args: []string{"-"}, stdin: safe},
+		}
+		if !reflect.DeepEqual(executor.calls, want) {
+			t.Fatalf("calls = %#v, want %#v", executor.calls, want)
+		}
+	})
+
+	t.Run("dangerous keep retains only line feeds", func(t *testing.T) {
+		executor := &fakeExecutor{}
+		cfg := sinkConfig("type", "clean-only")
+		cfg.Sink.TypeNewlines = "dangerous-keep"
+		delivery, err := New(cfg, Options{Executor: executor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := delivery.Deliver(context.Background(), input); err != nil {
+			t.Fatal(err)
+		}
+		const dangerous = "a\nb\nc\nd efghijé🙂"
+		want := []call{
+			{name: "wl-copy", stdin: dangerous},
+			{name: "wtype", args: []string{"-"}, stdin: dangerous},
+		}
+		if !reflect.DeepEqual(executor.calls, want) {
+			t.Fatalf("calls = %#v, want %#v", executor.calls, want)
+		}
+	})
+
+	t.Run("paste fallback", func(t *testing.T) {
+		failure := errors.New("shortcut failed")
+		executor := &fakeExecutor{results: []error{nil, failure, nil}}
+		cfg := sinkConfig("paste", "clean-only")
+		cfg.Sink.PasteShortcuts = []string{"ctrl+v"}
+		delivery, err := New(cfg, Options{Executor: executor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := delivery.Deliver(context.Background(), input); err != nil {
+			t.Fatal(err)
+		}
+		want := []call{
+			{name: "wl-copy", stdin: safe},
+			{name: "wtype", args: []string{"-M", "ctrl", "v", "-m", "ctrl"}},
+			{name: "wtype", args: []string{"-"}, stdin: safe},
+		}
+		if !reflect.DeepEqual(executor.calls, want) {
+			t.Fatalf("calls = %#v, want %#v", executor.calls, want)
+		}
+	})
+
+	for _, mode := range []string{"paste", "auto"} {
+		t.Run(mode+" without clipboard", func(t *testing.T) {
+			executor := &fakeExecutor{}
+			cfg := sinkConfig(mode, "none")
+			cfg.Sink.AutoMode = "paste"
+			delivery, err := New(cfg, Options{Executor: executor})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := delivery.Deliver(context.Background(), input); err != nil {
+				t.Fatal(err)
+			}
+			want := []call{{name: "wtype", args: []string{"-"}, stdin: safe}}
+			if !reflect.DeepEqual(executor.calls, want) {
+				t.Fatalf("calls = %#v, want %#v", executor.calls, want)
+			}
+		})
+	}
+}
+
+func TestActiveRawClipboardUsesSanitizedText(t *testing.T) {
+	executor := &fakeExecutor{}
+	cfg := sinkConfig("paste", "raw-and-clean")
+	delivery, err := New(cfg, Options{Executor: executor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := delivery.(interface {
+		CopyRaw(context.Context, string) error
+	})
+	if err := raw.CopyRaw(context.Background(), "raw\n\x1b\u0085text"); err != nil {
+		t.Fatal(err)
+	}
+	if got := executor.calls[0].stdin; got != "raw text" {
+		t.Fatalf("raw wl-copy stdin = %q", got)
+	}
+}
+
+func TestPassiveSinksPreserveProviderText(t *testing.T) {
+	const input = "a\r\nb\tc\x1b\x00\u0085é🙂"
+
+	t.Run("clipboard", func(t *testing.T) {
+		executor := &fakeExecutor{}
+		delivery, err := New(sinkConfig("clipboard", "clean-only"), Options{Executor: executor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := delivery.Deliver(context.Background(), input); err != nil {
+			t.Fatal(err)
+		}
+		if len(executor.calls) != 1 || executor.calls[0].stdin != input {
+			t.Fatalf("calls = %#v", executor.calls)
+		}
+	})
+
+	t.Run("clipboard-only", func(t *testing.T) {
+		executor := &fakeExecutor{}
+		delivery, err := New(sinkConfig("paste", "clean-only"), Options{Executor: executor, ClipboardOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := delivery.Deliver(context.Background(), input); err != nil {
+			t.Fatal(err)
+		}
+		if len(executor.calls) != 1 || executor.calls[0].stdin != input {
+			t.Fatalf("calls = %#v", executor.calls)
+		}
+	})
+
+	t.Run("stdout", func(t *testing.T) {
+		var output strings.Builder
+		delivery, err := New(sinkConfig("stdout", "none"), Options{Stdout: &output})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := delivery.Deliver(context.Background(), input); err != nil {
+			t.Fatal(err)
+		}
+		if output.String() != input+"\n" {
+			t.Fatalf("stdout = %q", output.String())
+		}
+	})
+
+	t.Run("file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "result.txt")
+		cfg := sinkConfig("file", "none")
+		cfg.Sink.File = path
+		delivery, err := New(cfg, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := delivery.Deliver(context.Background(), input); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != input {
+			t.Fatalf("file = %q, error=%v", data, err)
+		}
+	})
 }
 
 func TestClipboardSink(t *testing.T) {
@@ -153,6 +321,46 @@ func TestAutoResolvesToConfiguredTarget(t *testing.T) {
 	}
 	if len(executor.calls) != 1 || !reflect.DeepEqual(executor.calls[0].args, []string{"-"}) {
 		t.Fatalf("calls = %#v", executor.calls)
+	}
+}
+
+func TestTransientPasteShortcutIsRejectedDefensively(t *testing.T) {
+	for _, mode := range []string{"paste", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := sinkConfig(mode, "transient")
+			cfg.Sink.AutoMode = "paste"
+			_, err := New(cfg, Options{Executor: &fakeExecutor{}})
+			if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), "consommation") {
+				t.Fatalf("New() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestTransientDirectTypingClearsAfterInjection(t *testing.T) {
+	for _, mode := range []string{"type", "paste"} {
+		t.Run(mode, func(t *testing.T) {
+			executor := &fakeExecutor{}
+			cfg := sinkConfig(mode, "transient")
+			if mode == "paste" {
+				cfg.Sink.PasteShortcuts = nil
+			}
+			delivery, err := New(cfg, Options{Executor: executor})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := delivery.Deliver(context.Background(), "final"); err != nil {
+				t.Fatal(err)
+			}
+			want := []call{
+				{name: "wl-copy", stdin: "final"},
+				{name: "wtype", args: []string{"-"}, stdin: "final"},
+				{name: "wl-copy", args: []string{"--clear"}},
+			}
+			if !reflect.DeepEqual(executor.calls, want) {
+				t.Fatalf("calls = %#v, want %#v", executor.calls, want)
+			}
+		})
 	}
 }
 
@@ -255,18 +463,165 @@ func TestSinkFailurePreservesClipboardAccordingToPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("transient", func(t *testing.T) {
-		executor := &fakeExecutor{results: []error{nil, failure, failure, failure, failure, nil}}
-		delivery, err := New(sinkConfig("paste", "transient"), Options{Executor: executor})
+	t.Run("transient type", func(t *testing.T) {
+		executor := &fakeExecutor{results: []error{nil, failure, nil}}
+		delivery, err := New(sinkConfig("type", "transient"), Options{Executor: executor})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := delivery.Deliver(context.Background(), "final"); errs.Classify(err) != errs.SinkFailed {
 			t.Fatalf("error = %v", err)
 		}
-		last := executor.calls[len(executor.calls)-1]
-		if last.name != "wl-copy" || !reflect.DeepEqual(last.args, []string{"--clear"}) {
-			t.Fatalf("last call = %#v", last)
+		want := []call{
+			{name: "wl-copy", stdin: "final"},
+			{name: "wtype", args: []string{"-"}, stdin: "final"},
+			{name: "wl-copy", args: []string{"--clear"}},
+		}
+		if !reflect.DeepEqual(executor.calls, want) {
+			t.Fatalf("calls = %#v, want %#v", executor.calls, want)
 		}
 	})
+}
+
+func TestTransientClearGetsFreshBudgetAfterInjectionDeadline(t *testing.T) {
+	var calls int
+	executor := &sysexec.FakeExecutor{RunFunc: func(ctx context.Context, _ string, args []string, _ []byte) ([]byte, error) {
+		calls++
+		switch calls {
+		case 1:
+			return nil, nil
+		case 2:
+			<-ctx.Done()
+			return nil, ctx.Err()
+		case 3:
+			if !reflect.DeepEqual(args, []string{"--clear"}) {
+				t.Fatalf("clear args = %v", args)
+			}
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("clear context = %v", err)
+			}
+			if _, ok := ctx.Deadline(); !ok {
+				t.Fatal("clear without deadline")
+			}
+			return nil, nil
+		default:
+			t.Fatalf("unexpected call %d", calls)
+			return nil, nil
+		}
+	}}
+	delivery, err := New(sinkConfig("type", "transient"), Options{Executor: executor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := delivery.Deliver(ctx, "final"); errs.Classify(err) != errs.SinkFailed {
+		t.Fatalf("error = %v, class = %s", err, errs.Classify(err))
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3", calls)
+	}
+}
+
+func TestTransientClearStillObservesExplicitCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls int
+	executor := &sysexec.FakeExecutor{RunFunc: func(commandCtx context.Context, _ string, args []string, _ []byte) ([]byte, error) {
+		calls++
+		switch calls {
+		case 1:
+			return nil, nil
+		case 2:
+			cancel()
+			return nil, context.Canceled
+		case 3:
+			if !reflect.DeepEqual(args, []string{"--clear"}) {
+				t.Fatalf("clear args = %v", args)
+			}
+			if !errors.Is(commandCtx.Err(), context.Canceled) {
+				t.Fatalf("clear context = %v", commandCtx.Err())
+			}
+			return nil, commandCtx.Err()
+		default:
+			t.Fatalf("unexpected call %d", calls)
+			return nil, nil
+		}
+	}}
+	delivery, err := New(sinkConfig("type", "transient"), Options{Executor: executor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.Deliver(ctx, "final"); errs.Classify(err) != errs.Cancelled {
+		t.Fatalf("error = %v, class = %s", err, errs.Classify(err))
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3", calls)
+	}
+}
+
+func TestExternalDeliveryTimeoutsAreSinkFailures(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	tests := []struct {
+		name          string
+		mode          string
+		clipboardMode string
+		blockCall     int
+	}{
+		{name: "copy-final", mode: "clipboard", clipboardMode: "clean-only", blockCall: 1},
+		{name: "paste", mode: "paste", clipboardMode: "clean-only", blockCall: 2},
+		{name: "type", mode: "type", clipboardMode: "none", blockCall: 1},
+		{name: "clear", mode: "type", clipboardMode: "transient", blockCall: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			executor := &sysexec.FakeExecutor{RunFunc: func(ctx context.Context, _ string, _ []string, _ []byte) ([]byte, error) {
+				calls++
+				if _, ok := ctx.Deadline(); !ok {
+					t.Error("commande sans deadline")
+				}
+				if calls != test.blockCall {
+					return nil, nil
+				}
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}}
+			delivery, err := New(sinkConfig(test.mode, test.clipboardMode), Options{Executor: executor})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			if err := delivery.Deliver(ctx, "final"); errs.Classify(err) != errs.SinkFailed {
+				t.Fatalf("error = %v, class = %s", err, errs.Classify(err))
+			}
+		})
+	}
+}
+
+func TestRawClipboardUsesDeliveryTimeout(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	active := atomic.Int32{}
+	executor := &sysexec.FakeExecutor{RunFunc: func(ctx context.Context, _ string, _ []string, _ []byte) ([]byte, error) {
+		active.Add(1)
+		defer active.Add(-1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	delivery, err := New(sinkConfig("stdout", "raw-and-clean"), Options{Executor: executor, Stdout: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := delivery.(interface {
+		CopyRaw(context.Context, string) error
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := raw.CopyRaw(ctx, "raw"); errs.Classify(err) != errs.SinkFailed {
+		t.Fatalf("error = %v, class = %s", err, errs.Classify(err))
+	}
+	if active.Load() != 0 {
+		t.Fatalf("commandes encore actives = %d", active.Load())
+	}
 }

@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "command": "cleanup",
+  "success": false,
+  "provider": "",
+  "model": "",
+  "language": "",
+  "transcript_raw": "texte",
+  "transcript_final": "texte",
+  "segment_count": 0,
+  "segments": [],
+  "warnings": [],
+  "error": null
+}

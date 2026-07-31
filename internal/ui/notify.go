@@ -9,14 +9,21 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"git.2027a.net/mathieu/murmur/internal/events"
+	"git.2027a.net/mathieu/murmur/internal/logging"
 )
 
 const (
-	notificationBuffer       = 16
 	notificationPrefix       = "🟢 "
 	cancelNotificationPrefix = "🟠 "
 	errorNotificationPrefix  = "🔴 "
+	notificationCallTimeout  = 2 * time.Second
+	notificationCloseTimeout = notificationCallTimeout + 250*time.Millisecond
 )
+
+type notificationRequest struct {
+	value    Notification
+	terminal bool
+}
 
 type Notification struct {
 	Summary   string
@@ -34,19 +41,37 @@ type NotificationClient interface {
 type Notify struct {
 	client NotificationClient
 	warn   WarnFunc
-	queue  chan Notification
-	stop   chan struct{}
+	wake   chan struct{}
 	done   chan struct{}
 	once   sync.Once
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	callTimeout  time.Duration
+	closeTimeout time.Duration
+	mu           sync.Mutex
+	pending      *notificationRequest
+	closed       bool
+	terminalSeen bool
+	activeCancel context.CancelFunc
+	activeTerm   bool
 }
 
 func NewNotify(client NotificationClient, warn WarnFunc) *Notify {
+	return newNotify(client, warn, notificationCallTimeout, notificationCloseTimeout)
+}
+
+func newNotify(client NotificationClient, warn WarnFunc, callTimeout, closeTimeout time.Duration) *Notify {
+	ctx, cancel := context.WithCancel(context.Background())
 	u := &Notify{
-		client: client,
-		warn:   warn,
-		queue:  make(chan Notification, notificationBuffer),
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
+		client:       client,
+		warn:         warn,
+		wake:         make(chan struct{}, 1),
+		done:         make(chan struct{}),
+		ctx:          ctx,
+		cancel:       cancel,
+		callTimeout:  callTimeout,
+		closeTimeout: closeTimeout,
 	}
 	go u.run()
 	return u
@@ -56,7 +81,7 @@ func NewNotify(client NotificationClient, warn WarnFunc) *Notify {
 func NewDesktopNotifications(warn WarnFunc) UI {
 	client, err := NewDBusNotificationClient()
 	if err != nil {
-		warning(warn, "notifications D-Bus indisponibles: %v", err)
+		warning(logging.ComponentDBus, warn, "notifications D-Bus indisponibles")
 		return NewNone()
 	}
 	return NewNotify(client, warn)
@@ -70,23 +95,26 @@ func (u *Notify) Show(event events.Event) {
 	if !ok {
 		return
 	}
-	select {
-	case <-u.stop:
+	request := notificationRequest{value: notification, terminal: event.Type == events.Terminal}
+	u.mu.Lock()
+	if u.closed {
+		u.mu.Unlock()
 		return
-	default:
 	}
-	// Keep recent state changes when the desktop service is slow.
+	if u.terminalSeen && !request.terminal {
+		u.mu.Unlock()
+		return
+	}
+	if request.terminal {
+		u.terminalSeen = true
+	}
+	if u.pending == nil || request.terminal || !u.pending.terminal {
+		u.pending = &request
+	}
+	u.mu.Unlock()
 	select {
-	case u.queue <- notification:
+	case u.wake <- struct{}{}:
 	default:
-		select {
-		case <-u.queue:
-		default:
-		}
-		select {
-		case u.queue <- notification:
-		default:
-		}
 	}
 }
 
@@ -95,8 +123,29 @@ func (u *Notify) Close() {
 		return
 	}
 	u.once.Do(func() {
-		close(u.stop)
-		<-u.done
+		u.mu.Lock()
+		u.closed = true
+		if !u.terminalSeen {
+			u.pending = nil
+		}
+		if u.activeCancel != nil && (!u.activeTerm || !u.terminalSeen) {
+			u.activeCancel()
+		}
+		u.mu.Unlock()
+		select {
+		case u.wake <- struct{}{}:
+		default:
+		}
+
+		timer := time.NewTimer(u.closeTimeout)
+		select {
+		case <-u.done:
+		case <-timer.C:
+			u.cancel()
+			<-u.done
+		}
+		timer.Stop()
+		u.cancel()
 	})
 }
 
@@ -105,19 +154,38 @@ func (u *Notify) run() {
 	defer u.client.Close()
 	var replacesID uint32
 	for {
-		select {
-		case <-u.stop:
-			return
-		case notification := <-u.queue:
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			id, err := u.client.Notify(ctx, replacesID, notification)
-			cancel()
-			if err != nil {
-				warning(u.warn, "notification ignoree: %v", err)
-				continue
+		u.mu.Lock()
+		request := u.pending
+		u.pending = nil
+		if request == nil {
+			closed := u.closed
+			u.mu.Unlock()
+			if closed {
+				return
 			}
-			replacesID = id
+			select {
+			case <-u.wake:
+				continue
+			case <-u.ctx.Done():
+				return
+			}
 		}
+		ctx, cancel := context.WithTimeout(u.ctx, u.callTimeout)
+		u.activeCancel = cancel
+		u.activeTerm = request.terminal
+		u.mu.Unlock()
+
+		id, err := u.client.Notify(ctx, replacesID, request.value)
+		cancel()
+		u.mu.Lock()
+		u.activeCancel = nil
+		u.activeTerm = false
+		u.mu.Unlock()
+		if err != nil {
+			warning(logging.ComponentDBus, u.warn, "appel de notification échoué")
+			continue
+		}
+		replacesID = id
 	}
 }
 

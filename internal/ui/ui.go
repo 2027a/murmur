@@ -12,12 +12,12 @@ type UI interface {
 
 type WarnFunc func(format string, args ...any)
 
-func warning(warn WarnFunc, format string, args ...any) {
+func warning(component logging.Component, warn WarnFunc, message string) {
 	if warn != nil {
-		warn(format, args...)
+		warn("%s", message)
 		return
 	}
-	logging.Warnf("ui: "+format, args...)
+	logging.Warnf(component, "%s", message)
 }
 
 type None struct{}

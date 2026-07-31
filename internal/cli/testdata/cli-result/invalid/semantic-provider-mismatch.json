@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "command": "dictate",
+  "success": true,
+  "provider": "primary",
+  "model": "primary-model",
+  "language": "fr",
+  "transcript_raw": "un deux",
+  "transcript_final": "un deux",
+  "segment_count": 2,
+  "segments": [
+    {"index": 0, "provider": "primary", "model": "primary-model", "language": "fr", "transcript": "un"},
+    {"index": 1, "provider": "fallback", "model": "fallback-model", "language": "fr", "transcript": "deux"}
+  ],
+  "warnings": [],
+  "error": null
+}

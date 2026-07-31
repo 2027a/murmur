@@ -65,6 +65,8 @@ class MurmurOSD:
         self.hide_source = 0
         self.pulse_source = 0
         self.pulse_on = False
+        self.input_closed = False
+        self.terminal_received = False
 
         self.window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
         self.window.set_decorated(False)
@@ -170,7 +172,7 @@ class MurmurOSD:
         except BlockingIOError:
             return True
         except OSError:
-            Gtk.main_quit()
+            self.finish_input()
             return False
 
         if chunk:
@@ -181,9 +183,14 @@ class MurmurOSD:
                 line, self.input_buffer = self.input_buffer.split(b"\n", 1)
                 self.apply_line(line)
         if not chunk or condition & (GLib.IO_HUP | GLib.IO_ERR):
-            Gtk.main_quit()
+            self.finish_input()
             return False
         return True
+
+    def finish_input(self) -> None:
+        self.input_closed = True
+        if not self.terminal_received or not self.hide_source:
+            Gtk.main_quit()
 
     def apply_line(self, line: bytes) -> None:
         try:
@@ -210,6 +217,8 @@ class MurmurOSD:
         self.label.set_text(label)
 
         error = state == "error" or result == "failed"
+        if state == "terminal":
+            self.terminal_received = True
         self.set_css("#BF616A" if error else "#A3BE8C")
         self.set_recording_pulse(state == "recording")
         self.window.show_all()
@@ -234,6 +243,8 @@ class MurmurOSD:
         self.window.hide()
         self.hide_source = 0
         self.cancel_pulse_timer()
+        if self.input_closed:
+            Gtk.main_quit()
         return False
 
     def cancel_hide_timer(self) -> None:

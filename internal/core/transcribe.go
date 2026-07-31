@@ -15,13 +15,23 @@ import (
 
 // TranscribeFile validates and transcribes a canonical WAV without taking
 // ownership of the source file.
-func TranscribeFile(ctx context.Context, path string, chunkDuration time.Duration, transcriber *stt.Chain, progress stt.Progress) (stt.MultiResult, error) {
+func TranscribeFile(ctx context.Context, path string, chunkDuration time.Duration, transcriber *stt.Chain, progress stt.Progress) (result stt.MultiResult, err error) {
 	file, err := wav.Open(path)
 	if err != nil {
 		return stt.MultiResult{}, err
 	}
+	defer func() { err = errors.Join(err, file.Close()) }()
 	if transcriber == nil {
 		return stt.MultiResult{}, errs.New(errs.Internal, "stt", "transcriber absent")
+	}
+	if chunkDuration > 0 {
+		count, countErr := file.SegmentCount(chunkDuration, time.Second)
+		if countErr != nil {
+			return stt.MultiResult{}, countErr
+		}
+		if countErr := transcriber.ValidateSegmentCount(count); countErr != nil {
+			return stt.MultiResult{}, countErr
+		}
 	}
 
 	outputDir := ""
@@ -46,7 +56,7 @@ func TranscribeFile(ctx context.Context, path string, chunkDuration time.Duratio
 		}}
 	}
 	close(requests)
-	result, err := transcriber.TranscribeStream(ctx, requests, progress)
+	result, err = transcriber.TranscribeStream(ctx, requests, progress)
 	cleanupErr := audio.RemoveSegments(segments)
 	if err != nil {
 		return stt.MultiResult{}, errors.Join(err, cleanupErr)

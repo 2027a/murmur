@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "command": "transcribe",
+  "success": true,
+  "provider": "local",
+  "model": "large-v3",
+  "language": "fr",
+  "transcript_raw": "un deux",
+  "transcript_final": "un deux",
+  "segment_count": 2,
+  "segments": [
+    {"index": 0, "provider": "local", "model": "large-v3", "language": "fr", "transcript": "un"},
+    {"index": 1, "provider": "local", "model": "small-fr", "language": "fr", "transcript": "deux"}
+  ],
+  "warnings": [],
+  "error": null
+}

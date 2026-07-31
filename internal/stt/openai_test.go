@@ -1,9 +1,11 @@
 package stt
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,7 +31,11 @@ func TestOpenAICompatibleContract(t *testing.T) {
 		{name: "openai-like", apiKey: "secret", auth: "Bearer secret"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			provider := newTestProvider(t, Config{
+				Name: "provider", BaseURL: "http://127.0.0.1/v1", Model: "large-v3", Language: "fr",
+				Prompt: "vocabulaire", APIKey: test.apiKey, Timeout: 2 * time.Second, AllowedZone: policy.Local,
+			})
+			provider.client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				if r.Method != http.MethodPost || r.URL.Path != "/v1/audio/transcriptions" {
 					t.Errorf("request = %s %s", r.Method, r.URL.Path)
 				}
@@ -38,7 +44,7 @@ func TestOpenAICompatibleContract(t *testing.T) {
 				}
 				if err := r.ParseMultipartForm(2 << 20); err != nil {
 					t.Errorf("ParseMultipartForm: %v", err)
-					return
+					return nil, err
 				}
 				for field, want := range map[string]string{
 					"model": "large-v3", "language": "fr", "prompt": "vocabulaire", "response_format": "json",
@@ -50,7 +56,7 @@ func TestOpenAICompatibleContract(t *testing.T) {
 				file, header, err := r.FormFile("file")
 				if err != nil {
 					t.Errorf("FormFile: %v", err)
-					return
+					return nil, err
 				}
 				defer file.Close()
 				data, err := io.ReadAll(file)
@@ -60,14 +66,11 @@ func TestOpenAICompatibleContract(t *testing.T) {
 				if header.Filename != "capture.wav" || len(data) != 1500044 {
 					t.Errorf("file = %q, %d bytes", header.Filename, len(data))
 				}
-				w.Header().Set("Content-Type", "application/json")
-				io.WriteString(w, `{"text":" transcription "}`)
-			}))
-			defer server.Close()
-
-			provider := newTestProvider(t, Config{
-				Name: "provider", BaseURL: server.URL + "/v1", Model: "large-v3", Language: "fr",
-				Prompt: "vocabulaire", APIKey: test.apiKey, Timeout: 2 * time.Second, AllowedZone: policy.Local,
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"text":" transcription "}`)),
+				}, nil
 			})
 			result, err := provider.Transcribe(context.Background(), Request{Audio: audio, Filename: "capture.wav"})
 			if err != nil {
@@ -80,6 +83,45 @@ func TestOpenAICompatibleContract(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleUploadsOnlyPinnedValidatedRIFF(t *testing.T) {
+	audio := writeAudio(t, "validated audio")
+	expected, err := os.ReadFile(audio.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := os.OpenFile(audio.Path(), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.WriteString("CANARY-SUFFIX"); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pinnedPath := audio.Path() + ".pinned"
+	if err := os.Rename(audio.Path(), pinnedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(audio.Path(), []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var uploaded []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uploaded = multipartFile(t, r)
+		io.WriteString(w, `{"text":"ok"}`)
+	}))
+	defer server.Close()
+	provider := newTestProvider(t, Config{Name: "test", BaseURL: server.URL, Timeout: time.Second, AllowedZone: policy.Local})
+	if _, err := provider.Transcribe(context.Background(), Request{Audio: audio}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(uploaded, expected) || bytes.Contains(uploaded, []byte("CANARY")) || bytes.Contains(uploaded, []byte("replacement")) {
+		t.Fatalf("upload=%d octets, RIFF validé=%d", len(uploaded), len(expected))
+	}
+}
+
 func TestOpenAICompatibleRejectsAmbiguousBaseURL(t *testing.T) {
 	for _, baseURL := range []string{
 		"http://user:secret@127.0.0.1/v1",
@@ -89,6 +131,13 @@ func TestOpenAICompatibleRejectsAmbiguousBaseURL(t *testing.T) {
 		if _, err := NewOpenAICompatible(Config{Name: "test", BaseURL: baseURL, Timeout: time.Second}); errs.Classify(err) != errs.ConfigInvalid {
 			t.Errorf("base URL %q accepted: %v", baseURL, err)
 		}
+	}
+}
+
+func TestOpenAICompatibleRejectsEmptyModel(t *testing.T) {
+	_, err := NewOpenAICompatible(Config{Name: "test", BaseURL: "http://127.0.0.1/v1", Timeout: time.Second})
+	if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), "modèle") {
+		t.Fatalf("constructor error = %v", err)
 	}
 }
 
@@ -108,7 +157,7 @@ func TestOpenAICompatibleClassifiesResponses(t *testing.T) {
 		{"empty text", http.StatusOK, `{"text":" "}`, errs.EmptyResponse},
 		{"missing text", http.StatusOK, `{}`, errs.EmptyResponse},
 		{"invalid json", http.StatusOK, `{`, errs.ServerError},
-		{"large response", http.StatusOK, strings.Repeat("x", maxResponseBytes+1), errs.ServerError},
+		{"large response", http.StatusOK, strings.Repeat("x", MaxResponseBytes+1), errs.ServerError},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -122,6 +171,62 @@ func TestOpenAICompatibleClassifiesResponses(t *testing.T) {
 				t.Fatalf("error = %v, class = %s, want %s", err, got, test.want)
 			}
 		})
+	}
+}
+
+func TestOpenAICompatibleNon2xxStatusPrecedesBodyErrors(t *testing.T) {
+	audio := writeAudio(t, "audio")
+	largeBody := []byte(responseCanary + strings.Repeat("x", MaxResponseBytes+1))
+	statuses := []struct {
+		name   string
+		status int
+		want   errs.Class
+	}{
+		{"unauthorized", http.StatusUnauthorized, errs.AuthFailed},
+		{"forbidden", http.StatusForbidden, errs.AuthFailed},
+		{"request timeout", http.StatusRequestTimeout, errs.Timeout},
+		{"rate limited", http.StatusTooManyRequests, errs.Unavailable},
+		{"server error", http.StatusServiceUnavailable, errs.ServerError},
+	}
+	bodies := []struct {
+		name     string
+		wantRead int64
+		new      func() *trackedResponseBody
+	}{
+		{"over limit", MaxResponseBytes, func() *trackedResponseBody {
+			return &trackedResponseBody{reader: bytes.NewReader(largeBody)}
+		}},
+		{"unreadable", 0, func() *trackedResponseBody {
+			return &trackedResponseBody{reader: errorReader{err: errors.New(responseCanary)}}
+		}},
+	}
+
+	for _, status := range statuses {
+		for _, bodyTest := range bodies {
+			t.Run(status.name+"/"+bodyTest.name, func(t *testing.T) {
+				body := bodyTest.new()
+				provider := newTestProvider(t, Config{
+					Name: "test", BaseURL: "http://127.0.0.1", Timeout: time.Second, AllowedZone: policy.Local,
+				})
+				provider.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: status.status, Header: make(http.Header), Body: body}, nil
+				})
+
+				_, err := provider.Transcribe(context.Background(), Request{Audio: audio})
+				if got := errs.Classify(err); got != status.want {
+					t.Fatalf("class = %s, want %s: %v", got, status.want, err)
+				}
+				if strings.Contains(err.Error(), responseCanary) {
+					t.Fatalf("response body leaked in error: %v", err)
+				}
+				if !body.closed {
+					t.Fatal("response body was not closed")
+				}
+				if body.read != bodyTest.wantRead {
+					t.Fatalf("drained %d bytes, want %d", body.read, bodyTest.wantRead)
+				}
+			})
+		}
 	}
 }
 
@@ -166,78 +271,105 @@ func TestOpenAICompatibleNetworkAndPolicyClassification(t *testing.T) {
 	}
 }
 
-func TestOpenAICompatibleRetriesOnlyUnambiguousFailures(t *testing.T) {
-	audio := writeAudio(t, strings.Repeat("audio", 1000))
-	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if attempts.Add(1) < 3 {
-			http.Error(w, "later", http.StatusServiceUnavailable)
-			return
-		}
-		io.WriteString(w, `{"text":"ok"}`)
-	}))
-	defer server.Close()
-	provider := newTestProvider(t, Config{
-		Name: "test", BaseURL: server.URL, Timeout: time.Second, AllowedZone: policy.Local, Retries: 2,
-	})
-	if _, err := provider.Transcribe(context.Background(), Request{Audio: audio}); err != nil {
-		t.Fatal(err)
-	}
-	if got := attempts.Load(); got != 3 {
-		t.Fatalf("attempts = %d, want 3", got)
+func TestOpenAICompatibleRetryMatrix(t *testing.T) {
+	audio := writeAudio(t, "audio")
+	transportFailure := errors.New("transport failure")
+	tests := []struct {
+		name             string
+		status           int
+		requestBytesRead int
+		transportErr     error
+		responseBody     func() io.ReadCloser
+		wantClass        errs.Class
+		wantAttempts     int
+	}{
+		{name: "401", status: http.StatusUnauthorized, wantClass: errs.AuthFailed, wantAttempts: 1},
+		{name: "408", status: http.StatusRequestTimeout, wantClass: errs.Timeout, wantAttempts: 3},
+		{name: "429", status: http.StatusTooManyRequests, wantClass: errs.Unavailable, wantAttempts: 3},
+		{name: "5xx", status: http.StatusServiceUnavailable, wantClass: errs.ServerError, wantAttempts: 3},
+		{name: "6xx", status: 600, wantClass: errs.ServerError, wantAttempts: 1},
+		{name: "transport before multipart bytes", transportErr: transportFailure, wantClass: errs.Unavailable, wantAttempts: 3},
+		{name: "transport after multipart bytes", requestBytesRead: 1, transportErr: transportFailure, wantClass: errs.Unavailable, wantAttempts: 1},
+		{
+			name: "2xx response body read error", status: http.StatusOK,
+			responseBody: func() io.ReadCloser {
+				return io.NopCloser(errorReader{err: errors.New("response read failure")})
+			},
+			wantClass: errs.ServerError, wantAttempts: 1,
+		},
+		{
+			name: "2xx invalid JSON", status: http.StatusOK,
+			responseBody: func() io.ReadCloser {
+				return io.NopCloser(strings.NewReader(`{`))
+			},
+			wantClass: errs.ServerError, wantAttempts: 1,
+		},
+		{
+			name: "2xx oversized body", status: http.StatusOK,
+			responseBody: func() io.ReadCloser {
+				return io.NopCloser(strings.NewReader(strings.Repeat("x", MaxResponseBytes+1)))
+			},
+			wantClass: errs.ServerError, wantAttempts: 1,
+		},
+		{
+			name: "2xx empty text", status: http.StatusOK,
+			responseBody: func() io.ReadCloser {
+				return io.NopCloser(strings.NewReader(`{"text":" "}`))
+			},
+			wantClass: errs.EmptyResponse, wantAttempts: 1,
+		},
 	}
 
-	attempts.Store(0)
-	ambiguous := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts.Add(1)
-		io.Copy(io.Discard, r.Body)
-		hijacker, ok := w.(http.Hijacker)
-		if !ok {
-			t.Error("ResponseWriter does not support hijacking")
-			return
-		}
-		conn, _, err := hijacker.Hijack()
-		if err == nil {
-			conn.Close()
-		}
-	}))
-	defer ambiguous.Close()
-	provider = newTestProvider(t, Config{
-		Name: "test", BaseURL: ambiguous.URL, Timeout: time.Second, AllowedZone: policy.Local, Retries: 3,
-	})
-	_, err := provider.Transcribe(context.Background(), Request{Audio: audio})
-	if errs.Classify(err) != errs.Unavailable {
-		t.Fatalf("ambiguous error = %v", err)
-	}
-	if got := attempts.Load(); got != 1 {
-		t.Fatalf("ambiguous POST attempts = %d, want 1", got)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			attempts := 0
+			provider := newTestProvider(t, Config{
+				Name: "test", BaseURL: "http://127.0.0.1", Timeout: time.Second,
+				AllowedZone: policy.Local, Retries: 2,
+			})
+			provider.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				attempts++
+				if test.requestBytesRead > 0 {
+					buffer := make([]byte, test.requestBytesRead)
+					if _, err := io.ReadFull(request.Body, buffer); err != nil {
+						t.Fatalf("read multipart body: %v", err)
+					}
+				}
+				if test.transportErr != nil {
+					return nil, test.transportErr
+				}
+				body := io.ReadCloser(io.NopCloser(strings.NewReader(`{}`)))
+				if test.responseBody != nil {
+					body = test.responseBody()
+				}
+				return &http.Response{StatusCode: test.status, Header: make(http.Header), Body: body}, nil
+			})
+
+			_, err := provider.Transcribe(context.Background(), Request{Audio: audio})
+			if got := errs.Classify(err); got != test.wantClass {
+				t.Fatalf("class = %s, want %s: %v", got, test.wantClass, err)
+			}
+			if attempts != test.wantAttempts {
+				t.Fatalf("attempts = %d, want %d", attempts, test.wantAttempts)
+			}
+		})
 	}
 }
 
-func TestOpenAICompatibleDoesNotRetryAuthAndBoundsTotalTimeout(t *testing.T) {
+func TestOpenAICompatibleTimeoutIncludesRetryBackoff(t *testing.T) {
 	audio := writeAudio(t, "audio")
 	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts.Add(1)
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer server.Close()
 	provider := newTestProvider(t, Config{
-		Name: "test", BaseURL: server.URL, Timeout: time.Second, AllowedZone: policy.Local, Retries: 4,
-	})
-	provider.Transcribe(context.Background(), Request{Audio: audio})
-	if got := attempts.Load(); got != 1 {
-		t.Fatalf("auth attempts = %d, want 1", got)
-	}
-
-	attempts.Store(0)
-	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts.Add(1)
-		w.WriteHeader(http.StatusServiceUnavailable)
-	})
-	provider = newTestProvider(t, Config{
-		Name: "test", BaseURL: server.URL, Timeout: 40 * time.Millisecond, AllowedZone: policy.Local,
+		Name: "test", BaseURL: "http://127.0.0.1", Timeout: 40 * time.Millisecond, AllowedZone: policy.Local,
 		Retries: 4, RetryBackoff: 100 * time.Millisecond,
+	})
+	provider.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+		}, nil
 	})
 	started := time.Now()
 	_, err := provider.Transcribe(context.Background(), Request{Audio: audio})
@@ -289,8 +421,71 @@ func TestOpenAICompatibleHealthRedirectAndProxyPolicy(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleHealthBearerStaysOnTLSOrigin(t *testing.T) {
+	var originAuth atomic.Value
+	var originRequests atomic.Int32
+	originAuth.Store("")
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originRequests.Add(1)
+		originAuth.Store(r.Header.Get("Authorization"))
+		if r.URL.Path != "/health" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+
+	var foreignAuth atomic.Value
+	var foreignRequests atomic.Int32
+	foreignAuth.Store("")
+	foreign := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		foreignRequests.Add(1)
+		foreignAuth.Store(r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer foreign.Close()
+
+	_, err := NewOpenAICompatible(Config{
+		Name: "test", BaseURL: origin.URL + "/v1", APIKey: "secret", Timeout: time.Second,
+		AllowedZone: policy.Internet, HealthEnabled: true, HealthEndpoint: foreign.URL + "/health",
+	})
+	if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), "même origine") {
+		t.Fatalf("cross-origin constructor error = %v", err)
+	}
+	if foreignRequests.Load() != 0 || foreignAuth.Load().(string) != "" {
+		t.Fatalf("foreign health received %d requests with auth %q", foreignRequests.Load(), foreignAuth.Load())
+	}
+
+	provider := newTestProvider(t, Config{
+		Name: "test", BaseURL: origin.URL + "/v1", APIKey: "secret", Timeout: time.Second,
+		AllowedZone: policy.Internet, HealthEnabled: true, HealthEndpoint: "/health",
+	})
+	serverTransport := origin.Client().Transport.(*http.Transport)
+	providerTransport := provider.client.Transport.(*http.Transport)
+	providerTransport.TLSClientConfig = serverTransport.TLSClientConfig.Clone()
+	if err := provider.Health(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if originRequests.Load() != 1 || originAuth.Load().(string) != "Bearer secret" {
+		t.Fatalf("origin health received %d requests with auth %q", originRequests.Load(), originAuth.Load())
+	}
+}
+
+func TestOpenAICompatibleRejectsInsecureInternetHealthEndpoint(t *testing.T) {
+	_, err := NewOpenAICompatible(Config{
+		Name: "test", BaseURL: "https://example.com/v1", Timeout: time.Second,
+		AllowedZone: policy.Internet, HealthEnabled: true, HealthEndpoint: "http://example.com/health",
+	})
+	if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("constructor error = %v", err)
+	}
+}
+
 func newTestProvider(t *testing.T, config Config) *OpenAICompatible {
 	t.Helper()
+	if config.Model == "" {
+		config.Model = "test-model"
+	}
 	provider, err := NewOpenAICompatible(config)
 	if err != nil {
 		t.Fatal(err)
@@ -326,5 +521,56 @@ func writeAudio(t *testing.T, content string) wav.File {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = file.Close() })
 	return file
+}
+
+func multipartFile(t *testing.T, request *http.Request) []byte {
+	t.Helper()
+	if err := request.ParseMultipartForm(2 << 20); err != nil {
+		t.Fatal(err)
+	}
+	file, _, err := request.FormFile("file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+const responseCanary = "MURMUR_RESPONSE_BODY_CANARY"
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type trackedResponseBody struct {
+	reader io.Reader
+	read   int64
+	closed bool
+}
+
+func (b *trackedResponseBody) Read(buffer []byte) (int, error) {
+	n, err := b.reader.Read(buffer)
+	b.read += int64(n)
+	return n, err
+}
+
+func (b *trackedResponseBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read([]byte) (int, error) {
+	return 0, r.err
 }

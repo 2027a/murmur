@@ -259,7 +259,7 @@ func TestPipelineFallsBackOnAlteredCleanupToken(t *testing.T) {
 	if result.Text != "“one”\ntwo\n\nthree!" {
 		t.Fatalf("Run() = %q", result.Text)
 	}
-	if len(result.Warnings) != 1 || result.Warnings[0].Stage != "cleanup" {
+	if len(result.Warnings) != 1 || result.Warnings[0].Class != errs.EmptyResponse || result.Warnings[0].Component != "cleanup" {
 		t.Fatalf("warnings = %#v, want one cleanup warning", result.Warnings)
 	}
 }
@@ -302,8 +302,49 @@ func TestOptionalStageErrorsAreWarnings(t *testing.T) {
 	if result.Text != "« texte »" {
 		t.Fatalf("Run() = %q", result.Text)
 	}
-	if len(result.Warnings) != 2 || result.Warnings[0].Stage != "cleanup" || result.Warnings[1].Stage != "plugin" {
+	if len(result.Warnings) != 2 || result.Warnings[0].Class != errs.Internal || result.Warnings[0].Component != "cleanup" ||
+		result.Warnings[1].Class != errs.Internal || result.Warnings[1].Component != "plugin" {
 		t.Fatalf("warnings = %#v", result.Warnings)
+	}
+}
+
+func TestOptionalStageWarningsPreserveTypedClassesWithoutSensitiveErrors(t *testing.T) {
+	const canary = "MURMUR-SENSITIVE-WARNING-CANARY"
+	classes := []errs.Class{errs.ServerError, errs.Timeout, errs.AuthFailed, errs.PolicyBlocked, errs.Unavailable}
+	for _, component := range []string{"cleanup", "plugin"} {
+		for _, class := range classes {
+			t.Run(component+"/"+string(class), func(t *testing.T) {
+				stageErr := errs.Wrap(class, "unsafe/"+canary, "unsafe "+canary, errors.New("cause "+canary))
+				options := Options{CommandPack: "fr"}
+				if component == "cleanup" {
+					options.Cleanup = CleanupFunc(func(context.Context, string, Protection) (string, error) {
+						return "", stageErr
+					})
+				} else {
+					options.Plugin = PluginFunc(func(context.Context, string) (string, error) {
+						return "", stageErr
+					})
+				}
+				pipeline, err := New(options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				result, err := pipeline.Run(context.Background(), "texte sûr")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Warnings) != 1 || result.Warnings[0].Class != class || result.Warnings[0].Component != component {
+					t.Fatalf("warnings = %#v", result.Warnings)
+				}
+				encoded, err := json.Marshal(result)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if bytes.Contains(encoded, []byte(canary)) {
+					t.Fatalf("sensitive error leaked in %s", encoded)
+				}
+			})
+		}
 	}
 }
 

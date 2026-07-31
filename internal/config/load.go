@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -38,21 +41,48 @@ func ResolveWithOptions(options ResolveOptions) (Config, error) {
 		path = filepath.Join(dir, "config.toml")
 	}
 
-	metadata, err := toml.DecodeFile(path, &cfg)
+	file, identity, err := openConfigFile(path)
 	if err != nil {
-		if !explicitPath && os.IsNotExist(err) {
+		if !explicitPath && errors.Is(err, os.ErrNotExist) {
 			// Defaults form a valid local-only configuration.
 		} else {
 			return Config{}, errs.Wrap(errs.ConfigInvalid, "config", "lecture TOML impossible", err)
 		}
-	} else if undecoded := metadata.Undecoded(); len(undecoded) > 0 {
+	}
+	var metadata toml.MetaData
+	if file != nil {
+		if identity.size > MaxConfigBytes {
+			err = fmt.Errorf("config.toml dépasse 1 Mio")
+		}
+		var snapshot []byte
+		if err == nil {
+			snapshot, err = io.ReadAll(io.LimitReader(file, MaxConfigBytes+1))
+			if err == nil && len(snapshot) > MaxConfigBytes {
+				err = fmt.Errorf("config.toml dépasse 1 Mio")
+			}
+		}
+		if err == nil {
+			err = verifyConfigFile(file, path, identity)
+		}
+		if err == nil {
+			metadata, err = toml.NewDecoder(bytes.NewReader(snapshot)).Decode(&cfg)
+		}
+		closeErr := file.Close()
+		if err != nil {
+			return Config{}, errs.Wrap(errs.ConfigInvalid, "config", "lecture TOML impossible", err)
+		}
+		if closeErr != nil {
+			return Config{}, errs.Wrap(errs.ConfigInvalid, "config", "fermeture du fichier TOML impossible", closeErr)
+		}
+	}
+	if undecoded := metadata.Undecoded(); len(undecoded) > 0 {
 		keys := make([]string, 0, len(undecoded))
 		for _, key := range undecoded {
 			keys = append(keys, key.String())
 		}
 		sort.Strings(keys)
 		return Config{}, configError("clés TOML inconnues: " + strings.Join(keys, ", "))
-	} else {
+	} else if file != nil {
 		for _, key := range profileDefaultKeys {
 			parts := strings.Split(key, ".")
 			explicit[key] = metadata.IsDefined(parts...)
@@ -143,6 +173,20 @@ func applyEnvironment(cfg *Config, lookup func(string) (string, bool), explicit 
 		}
 		cfg.STT.ChunkWorkers = parsed
 	}
+	if value, ok := lookup("MURMUR_STT_MAX_TEXT_BYTES"); ok {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return configError("MURMUR_STT_MAX_TEXT_BYTES doit être un entier")
+		}
+		cfg.STT.MaxTextBytes = parsed
+	}
+	if value, ok := lookup("MURMUR_STT_MAX_SEGMENTS"); ok {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return configError("MURMUR_STT_MAX_SEGMENTS doit être un entier")
+		}
+		cfg.STT.MaxSegments = parsed
+	}
 	if value, ok := lookup("MURMUR_PLUGIN_TIMEOUT_S"); ok {
 		parsed, err := strconv.Atoi(value)
 		if err != nil {
@@ -156,6 +200,8 @@ func applyEnvironment(cfg *Config, lookup func(string) (string, bool), explicit 
 	}{
 		"MURMUR_OSD_SUCCESS_TIMEOUT_MS": {&cfg.UI.OSD.SuccessTimeoutMS, "ui.osd.success_timeout_ms"},
 		"MURMUR_OSD_ERROR_TIMEOUT_MS":   {&cfg.UI.OSD.ErrorTimeoutMS, "ui.osd.error_timeout_ms"},
+		"MURMUR_LOG_MAX_BYTES":          {&cfg.Logging.MaxBytes, "logging.max_bytes"},
+		"MURMUR_LOG_MAX_FILES":          {&cfg.Logging.MaxFiles, "logging.max_files"},
 		"MURMUR_SESSION_MAX_BYTES":      {&cfg.Logging.SessionMaxBytes, "logging.session_max_bytes"},
 		"MURMUR_SESSION_MAX_FILES":      {&cfg.Logging.SessionMaxFiles, "logging.session_max_files"},
 	}
@@ -209,6 +255,8 @@ func applyOverrides(cfg *Config, o Overrides, explicit map[string]bool) {
 	setInt(o.STTChunkSeconds, &cfg.STT.ChunkSeconds)
 	setBool(o.STTLiveChunking, &cfg.STT.LiveChunking)
 	setInt(o.STTChunkWorkers, &cfg.STT.ChunkWorkers)
+	setInt(o.STTMaxTextBytes, &cfg.STT.MaxTextBytes)
+	setInt(o.STTMaxSegments, &cfg.STT.MaxSegments)
 	setBool(o.STTAllowPartial, &cfg.STT.AllowPartial)
 	setBool(o.STTAllowMixed, &cfg.STT.AllowMixedProviders)
 	setBool(o.CleanupEnabled, &cfg.Cleanup.Enabled)

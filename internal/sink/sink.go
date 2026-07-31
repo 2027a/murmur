@@ -2,6 +2,7 @@ package sink
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"git.2027a.net/mathieu/murmur/internal/clipboard"
 	"git.2027a.net/mathieu/murmur/internal/config"
+	"git.2027a.net/mathieu/murmur/internal/delivery"
 	"git.2027a.net/mathieu/murmur/internal/errs"
 	"git.2027a.net/mathieu/murmur/internal/inject"
 	"git.2027a.net/mathieu/murmur/internal/sysexec"
@@ -25,6 +27,12 @@ const (
 	Stdout    Mode = "stdout"
 	File      Mode = "file"
 	Auto      Mode = "auto"
+)
+
+const (
+	ExternalCommandTimeout = delivery.CommandTimeout
+	// ExternalDeliveryTimeout covers final copy, injection, and transient clear.
+	ExternalDeliveryTimeout = 3 * delivery.CommandTimeout
 )
 
 type Sink interface {
@@ -50,7 +58,6 @@ func New(cfg config.Config, options Options) (Sink, error) {
 	} else if mode == Auto {
 		mode = Mode(cfg.Sink.AutoMode)
 	}
-
 	clipboardMode := clipboard.Mode(cfg.Sink.ClipboardMode)
 	board, err := clipboard.New(options.Executor, clipboardMode)
 	if err != nil {
@@ -61,11 +68,16 @@ func New(cfg config.Config, options Options) (Sink, error) {
 	}
 
 	var target Sink
+	var activeNewlines inject.NewlineMode
 	switch mode {
 	case Paste, Type:
-		injector, err := inject.New(options.Executor, cfg.Sink.PasteShortcuts, inject.NewlineMode(cfg.Sink.TypeNewlines))
+		activeNewlines = inject.NewlineMode(cfg.Sink.TypeNewlines)
+		injector, err := inject.New(options.Executor, cfg.Sink.PasteShortcuts, activeNewlines)
 		if err != nil {
 			return nil, err
+		}
+		if mode == Paste && clipboardMode == clipboard.Transient && len(cfg.Sink.PasteShortcuts) > 0 {
+			return nil, errs.New(errs.ConfigInvalid, "sink", "clipboard transient incompatible avec paste: wtype ne confirme pas la consommation du collage")
 		}
 		if mode == Type || clipboardMode == clipboard.None {
 			target = sinkFunc(injector.Type)
@@ -89,7 +101,11 @@ func New(cfg config.Config, options Options) (Sink, error) {
 		return nil, errs.New(errs.ConfigInvalid, "sink", fmt.Sprintf("mode invalide: %q", mode))
 	}
 
-	return Once(&clipboardSink{clipboard: board, target: target}), nil
+	delivery := Sink(&clipboardSink{clipboard: board, target: target})
+	if mode == Paste || mode == Type {
+		delivery = &activeTextSink{target: delivery, newlines: activeNewlines}
+	}
+	return Once(delivery), nil
 }
 
 type sinkFunc func(context.Context, string) error
@@ -123,6 +139,25 @@ type clipboardSink struct {
 	target    Sink
 }
 
+type activeTextSink struct {
+	target   Sink
+	newlines inject.NewlineMode
+}
+
+func (s *activeTextSink) CopyRaw(ctx context.Context, text string) error {
+	target, ok := s.target.(interface {
+		CopyRaw(context.Context, string) error
+	})
+	if !ok {
+		return nil
+	}
+	return target.CopyRaw(ctx, inject.SanitizeText(text, s.newlines))
+}
+
+func (s *activeTextSink) Deliver(ctx context.Context, text string) error {
+	return s.target.Deliver(ctx, inject.SanitizeText(text, s.newlines))
+}
+
 func (s *clipboardSink) CopyRaw(ctx context.Context, text string) error {
 	return s.clipboard.CopyRaw(ctx, text)
 }
@@ -132,8 +167,16 @@ func (s *clipboardSink) Deliver(ctx context.Context, text string) error {
 		return err
 	}
 	err := s.target.Deliver(ctx, text)
-	s.clipboard.Clear(ctx)
-	return err
+	clearCtx := ctx
+	cancelClear := func() {}
+	// A delivery deadline must not consume the transient cleanup budget;
+	// explicit cancellation remains attached.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		clearCtx, cancelClear = context.WithTimeout(context.WithoutCancel(ctx), delivery.CommandTimeout)
+	}
+	defer cancelClear()
+	clearErr := s.clipboard.Clear(clearCtx)
+	return errors.Join(err, clearErr)
 }
 
 type onceSink struct {

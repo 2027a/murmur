@@ -6,15 +6,20 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"git.2027a.net/mathieu/murmur/internal/errs"
 	"git.2027a.net/mathieu/murmur/internal/events"
+	"git.2027a.net/mathieu/murmur/internal/logging"
 	"git.2027a.net/mathieu/murmur/internal/sysexec"
 )
 
 const (
-	DefaultOSDHelper      = "murmur-osd"
-	DefaultOSDMaxRestarts = 3
+	DefaultOSDHelper           = "murmur-osd"
+	DefaultOSDMaxRestarts      = 3
+	DefaultOSDCloseTimeout     = 5 * time.Second
+	DefaultOSDIdleCloseTimeout = 250 * time.Millisecond
+	OSDHelperExitGrace         = time.Second
 )
 
 type OSDPayload struct {
@@ -29,11 +34,13 @@ type OSDPayload struct {
 }
 
 type OSDOptions struct {
-	Helper      string
-	Args        []string
-	Buffer      int
-	MaxRestarts int
-	Warn        WarnFunc
+	Helper           string
+	Args             []string
+	Buffer           int
+	MaxRestarts      int
+	CloseTimeout     time.Duration
+	IdleCloseTimeout time.Duration
+	Warn             WarnFunc
 }
 
 type OSD struct {
@@ -46,9 +53,12 @@ type OSD struct {
 	done     chan struct{}
 	once     sync.Once
 
-	mu     sync.Mutex
-	closed bool
-	proc   sysexec.Process
+	mu              sync.Mutex
+	closed          bool
+	proc            sysexec.Process
+	terminal        *OSDPayload
+	terminalWritten bool
+	closeDeadline   time.Time
 }
 
 func NewOSD(executor sysexec.Executor, options OSDOptions) *OSD {
@@ -62,6 +72,12 @@ func NewOSD(executor sysexec.Executor, options OSDOptions) *OSD {
 		options.MaxRestarts = DefaultOSDMaxRestarts
 	} else if options.MaxRestarts < 0 {
 		options.MaxRestarts = 0
+	}
+	if options.CloseTimeout <= 0 {
+		options.CloseTimeout = DefaultOSDCloseTimeout
+	}
+	if options.IdleCloseTimeout <= 0 {
+		options.IdleCloseTimeout = DefaultOSDIdleCloseTimeout
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	u := &OSD{
@@ -90,6 +106,14 @@ func (u *OSD) Show(event events.Event) {
 	if u.closed {
 		return
 	}
+	if u.terminal != nil && payload.State != "terminal" {
+		return
+	}
+	if payload.State == "terminal" {
+		terminal := payload
+		u.terminal = &terminal
+		u.terminalWritten = false
+	}
 	select {
 	case u.queue <- payload:
 	default:
@@ -111,14 +135,23 @@ func (u *OSD) Close() {
 	u.once.Do(func() {
 		u.mu.Lock()
 		u.closed = true
-		proc := u.proc
+		timeout := u.options.IdleCloseTimeout
+		if u.terminal != nil {
+			timeout = u.options.CloseTimeout
+		}
+		u.closeDeadline = time.Now().Add(timeout)
 		u.mu.Unlock()
 		close(u.stop)
-		u.cancel()
-		if proc != nil {
-			_ = proc.Kill()
+		timer := time.NewTimer(timeout)
+		select {
+		case <-u.done:
+		case <-timer.C:
+			u.cancel()
+			u.killProcess()
+			<-u.done
 		}
-		<-u.done
+		timer.Stop()
+		u.cancel()
 	})
 }
 
@@ -131,31 +164,39 @@ func (u *OSD) run() {
 	for {
 		select {
 		case <-u.stop:
-			u.killProcess()
+			u.shutdown(processDone)
 			return
 		case err := <-processDone:
 			u.clearProcess()
 			processDone = nil
 			if err != nil {
-				warning(u.options.Warn, "helper OSD termine: %v", err)
+				warning(logging.ComponentOSD, u.options.Warn, "helper OSD terminé en erreur")
+			}
+			if u.isClosed() {
+				u.shutdown(nil)
+				return
 			}
 			if !haveLastPayload || starts >= 1+u.options.MaxRestarts {
 				continue
 			}
 			starts++
-			proc, nextDone, startErr := u.startProcess()
+			proc, nextDone, startErr := u.startProcess(lastPayload.State == "terminal")
 			if startErr != nil {
-				warning(u.options.Warn, "redemarrage du helper OSD ignore: %v", startErr)
+				warning(logging.ComponentOSD, u.options.Warn, "redémarrage du helper OSD échoué")
 				continue
 			}
 			processDone = nextDone
 			if writeErr := writeOSDPayload(proc, lastPayload); writeErr != nil {
-				warning(u.options.Warn, "ecriture OSD ignoree: %v", writeErr)
+				warning(logging.ComponentOSD, u.options.Warn, "écriture vers le helper OSD échouée")
 				_ = proc.Kill()
-				u.clearProcess()
-				processDone = nil
+			} else {
+				u.markTerminalWritten(lastPayload)
 			}
 		case payload := <-u.queue:
+			if u.isClosed() {
+				u.shutdown(processDone)
+				return
+			}
 			lastPayload = payload
 			haveLastPayload = true
 			proc := u.currentProcess()
@@ -165,20 +206,26 @@ func (u *OSD) run() {
 				}
 				starts++
 				var err error
-				proc, processDone, err = u.startProcess()
+				proc, processDone, err = u.startProcess(payload.State == "terminal")
 				if err != nil {
-					warning(u.options.Warn, "demarrage du helper OSD ignore: %v", err)
+					warning(logging.ComponentOSD, u.options.Warn, "démarrage du helper OSD échoué")
 					continue
 				}
 			}
 			if err := writeOSDPayload(proc, payload); err != nil {
-				warning(u.options.Warn, "ecriture OSD ignoree: %v", err)
+				warning(logging.ComponentOSD, u.options.Warn, "écriture vers le helper OSD échouée")
 				_ = proc.Kill()
-				u.clearProcess()
-				processDone = nil
+			} else {
+				u.markTerminalWritten(payload)
 			}
 		}
 	}
+}
+
+func (u *OSD) isClosed() bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.closed
 }
 
 func writeOSDPayload(proc sysexec.Process, payload OSDPayload) error {
@@ -195,22 +242,100 @@ func writeOSDPayload(proc sysexec.Process, payload OSDPayload) error {
 	return err
 }
 
-func (u *OSD) startProcess() (sysexec.Process, <-chan error, error) {
+func (u *OSD) startProcess(allowClosed bool) (sysexec.Process, <-chan error, error) {
 	proc, err := u.executor.Start(u.ctx, u.options.Helper, append([]string(nil), u.options.Args...))
 	if err != nil {
 		return nil, nil, err
 	}
+	done := make(chan error, 1)
+	go func() { done <- proc.Wait() }()
 	u.mu.Lock()
-	if u.closed {
+	if u.closed && !allowClosed {
 		u.mu.Unlock()
 		_ = proc.Kill()
+		<-done
 		return nil, nil, errors.New("OSD ferme")
 	}
 	u.proc = proc
 	u.mu.Unlock()
-	done := make(chan error, 1)
-	go func() { done <- proc.Wait() }()
 	return proc, done, nil
+}
+
+func (u *OSD) markTerminalWritten(payload OSDPayload) {
+	if payload.State != "terminal" {
+		return
+	}
+	u.mu.Lock()
+	u.terminalWritten = true
+	u.mu.Unlock()
+}
+
+func (u *OSD) shutdown(processDone <-chan error) {
+	u.mu.Lock()
+	terminal := u.terminal
+	written := u.terminalWritten
+	u.mu.Unlock()
+	proc := u.currentProcess()
+	// A completed Wait before our EOF is a premature helper death.
+	if proc != nil && processDone != nil {
+		select {
+		case err := <-processDone:
+			if err != nil {
+				warning(logging.ComponentOSD, u.options.Warn, "helper OSD terminé en erreur")
+			}
+			u.clearProcess()
+			proc = nil
+			processDone = nil
+		default:
+		}
+	}
+	if terminal != nil && !written && proc != nil {
+		if err := writeOSDPayload(proc, *terminal); err != nil {
+			warning(logging.ComponentOSD, u.options.Warn, "écriture terminale vers le helper OSD échouée")
+			_ = proc.Kill()
+			if processDone != nil {
+				<-processDone
+			}
+			u.clearProcess()
+			proc = nil
+			processDone = nil
+		} else {
+			u.markTerminalWritten(*terminal)
+			written = true
+		}
+	}
+	if terminal != nil && (!written || proc == nil) && u.terminalRetryAllowed() {
+		var err error
+		proc, processDone, err = u.startProcess(true)
+		if err != nil {
+			warning(logging.ComponentOSD, u.options.Warn, "démarrage final du helper OSD échoué")
+			return
+		}
+		if err := writeOSDPayload(proc, *terminal); err != nil {
+			warning(logging.ComponentOSD, u.options.Warn, "écriture terminale vers le helper OSD échouée")
+			_ = proc.Kill()
+		} else {
+			u.markTerminalWritten(*terminal)
+		}
+	}
+	if proc == nil {
+		return
+	}
+	if stdin, ok := proc.(sysexec.InputProcess); ok {
+		_ = stdin.Stdin().Close()
+	} else {
+		_ = proc.Kill()
+	}
+	if processDone != nil {
+		<-processDone
+	}
+	u.clearProcess()
+}
+
+func (u *OSD) terminalRetryAllowed() bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.ctx.Err() == nil && !u.closeDeadline.IsZero() && time.Now().Before(u.closeDeadline)
 }
 
 func (u *OSD) currentProcess() sysexec.Process {

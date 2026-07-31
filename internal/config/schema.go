@@ -29,6 +29,8 @@ type STTConfig struct {
 	ChunkSeconds        int                       `toml:"chunk_seconds"`
 	LiveChunking        bool                      `toml:"live_chunking"`
 	ChunkWorkers        int                       `toml:"chunk_workers"`
+	MaxTextBytes        int                       `toml:"max_text_bytes"`
+	MaxSegments         int                       `toml:"max_segments"`
 	AllowPartial        bool                      `toml:"allow_partial"`
 	AllowMixedProviders bool                      `toml:"allow_mixed_providers"`
 	Providers           map[string]ProviderConfig `toml:"providers"`
@@ -126,6 +128,8 @@ type OSDConfig struct {
 
 type LoggingConfig struct {
 	Level           string `toml:"level"`
+	MaxBytes        int    `toml:"max_bytes"`
+	MaxFiles        int    `toml:"max_files"`
 	SessionJournal  bool   `toml:"session_journal"`
 	SessionMaxBytes int    `toml:"session_max_bytes"`
 	SessionMaxFiles int    `toml:"session_max_files"`
@@ -138,6 +142,8 @@ func Defaults() Config {
 		STT: STTConfig{
 			Provider:     "local",
 			ChunkWorkers: 2,
+			MaxTextBytes: 16 << 20,
+			MaxSegments:  4096,
 			Providers: map[string]ProviderConfig{
 				"local": {
 					Type:     "openai-compatible",
@@ -161,7 +167,7 @@ func Defaults() Config {
 			AutoMode:       "paste",
 			ClipboardMode:  "clean-only",
 			PasteShortcuts: []string{"ctrl+shift+v", "shift+insert", "ctrl+v"},
-			TypeNewlines:   "keep",
+			TypeNewlines:   "space",
 		},
 		UI: UIConfig{
 			Mode: "notify",
@@ -171,7 +177,7 @@ func Defaults() Config {
 			},
 		},
 		Logging: LoggingConfig{
-			Level: "info", SessionJournal: true,
+			Level: "info", MaxBytes: 1 << 20, MaxFiles: 3, SessionJournal: true,
 			SessionMaxBytes: 1 << 20, SessionMaxFiles: 3,
 		},
 	}
@@ -188,6 +194,8 @@ type Overrides struct {
 	STTChunkSeconds   *int
 	STTLiveChunking   *bool
 	STTChunkWorkers   *int
+	STTMaxTextBytes   *int
+	STTMaxSegments    *int
 	STTAllowPartial   *bool
 	STTAllowMixed     *bool
 	CleanupEnabled    *bool

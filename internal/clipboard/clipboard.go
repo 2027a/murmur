@@ -2,8 +2,10 @@ package clipboard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"git.2027a.net/mathieu/murmur/internal/delivery"
 	"git.2027a.net/mathieu/murmur/internal/errs"
 	"git.2027a.net/mathieu/murmur/internal/sysexec"
 )
@@ -50,17 +52,31 @@ func (c *Clipboard) CopyFinal(ctx context.Context, text string) error {
 	return c.copy(ctx, text)
 }
 
-// Clear removes a transient clipboard value on a best-effort basis.
-func (c *Clipboard) Clear(ctx context.Context) {
+// Clear removes a transient clipboard value and reports a failed attempt.
+func (c *Clipboard) Clear(ctx context.Context) error {
 	if c.mode != Transient {
-		return
+		return nil
 	}
-	_, _ = c.executor.Run(ctx, "wl-copy", []string{"--clear"}, nil)
+	commandCtx, cancel := context.WithTimeout(ctx, delivery.CommandTimeout)
+	defer cancel()
+	if _, err := c.executor.Run(commandCtx, "wl-copy", []string{"--clear"}, nil); err != nil {
+		return commandError(commandCtx, "effacement du presse-papiers impossible", err)
+	}
+	return nil
 }
 
 func (c *Clipboard) copy(ctx context.Context, text string) error {
-	if _, err := c.executor.Run(ctx, "wl-copy", nil, []byte(text)); err != nil {
-		return errs.Wrap(errs.SinkFailed, "clipboard", "écriture du presse-papiers impossible", err)
+	commandCtx, cancel := context.WithTimeout(ctx, delivery.CommandTimeout)
+	defer cancel()
+	if _, err := c.executor.Run(commandCtx, "wl-copy", nil, []byte(text)); err != nil {
+		return commandError(commandCtx, "écriture du presse-papiers impossible", err)
 	}
 	return nil
+}
+
+func commandError(ctx context.Context, message string, cause error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return errs.New(errs.SinkFailed, "clipboard", message+": délai de livraison dépassé")
+	}
+	return errs.Wrap(errs.SinkFailed, "clipboard", message, cause)
 }

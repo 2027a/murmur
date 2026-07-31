@@ -39,7 +39,7 @@ func RemoveSegments(segments []Segment) error {
 	var result error
 	for _, segment := range segments {
 		if segment.Temporary {
-			result = errors.Join(result, os.Remove(segment.File.Path()))
+			result = errors.Join(result, segment.File.Close(), os.Remove(segment.File.Path()))
 		}
 	}
 	return result

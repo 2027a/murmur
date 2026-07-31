@@ -51,6 +51,7 @@ type Config struct {
 	Timeout         time.Duration
 	AllowedZone     policy.Zone
 	TrustedNetworks []netip.Prefix
+	AllowInsecure   bool
 	HealthEnabled   bool
 	HealthEndpoint  string
 	Retries         int
@@ -87,18 +88,86 @@ type MultiOptions struct {
 	AllowMixedProviders bool
 	AllowPartial        bool
 	Workers             int
+	MaxTextBytes        int
+	MaxSegments         int
 }
 
 type Progress struct {
+	// Indexes are the original zero-based Segment.Index values.
 	Started func(index int, provider string)
 	Done    func(index int, provider string)
 	Failed  func(index int, provider string, class errs.Class)
 }
 
 const (
+	ProviderMixed         = "mixed"
 	WarningMixedProviders = "transcription mixte: plusieurs providers ont été utilisés et sont tracés par segment"
 	WarningPartial        = "transcription partielle: au moins un segment a échoué et a été omis"
+	TextBudgetExceeded    = "volume cumulé des transcriptions supérieur à la limite configurée"
+	SegmentLimitExceeded  = "nombre de segments STT supérieur à la limite configurée"
+	DefaultMaxTextBytes   = 16 << 20
+	DefaultMaxSegments    = 4096
+	MaximumMaxTextBytes   = 64 << 20
+	MaximumMaxSegments    = 65536
 )
+
+type transcriptLimitError struct {
+	cause    *errs.Error
+	provider string
+}
+
+func (e *transcriptLimitError) Error() string { return e.cause.Error() }
+func (e *transcriptLimitError) Unwrap() error { return e.cause }
+
+func newTranscriptLimitError(message, provider string) error {
+	return &transcriptLimitError{cause: errs.New(errs.ServerError, "stt", message), provider: provider}
+}
+
+func isTranscriptLimitError(err error) bool {
+	var limit *transcriptLimitError
+	return errors.As(err, &limit)
+}
+
+// IsLimitExceeded reports resource limits that must never enter fallback or delivery.
+func IsLimitExceeded(err error) bool { return isTranscriptLimitError(err) }
+
+type textBudget struct {
+	mu      sync.Mutex
+	limit   int
+	used    int
+	entries int
+	err     error
+}
+
+func newTextBudget(limit int) *textBudget {
+	return &textBudget{limit: limit}
+}
+
+func (b *textBudget) add(text, provider string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.err != nil {
+		return b.err
+	}
+	remaining := b.limit - b.used
+	if b.entries > 0 {
+		if remaining == 0 {
+			b.err = newTranscriptLimitError(TextBudgetExceeded, provider)
+			return b.err
+		}
+		remaining--
+	}
+	if len(text) > remaining {
+		b.err = newTranscriptLimitError(TextBudgetExceeded, provider)
+		return b.err
+	}
+	b.used += len(text)
+	if b.entries > 0 {
+		b.used++
+	}
+	b.entries++
+	return nil
+}
 
 // Chain applies a primary/fallback policy to one or more replayable audio files.
 type Chain struct {
@@ -120,14 +189,47 @@ func NewChain(primary, fallback Provider, options MultiOptions) (*Chain, error) 
 	if options.Workers == 0 {
 		options.Workers = 1
 	}
+	if options.MaxTextBytes < 0 || options.MaxTextBytes > MaximumMaxTextBytes {
+		return nil, errs.New(errs.ConfigInvalid, "stt", "le budget de texte doit être inférieur ou égal à 67108864")
+	}
+	if options.MaxTextBytes == 0 {
+		options.MaxTextBytes = DefaultMaxTextBytes
+	}
+	if options.MaxSegments < 0 || options.MaxSegments > MaximumMaxSegments {
+		return nil, errs.New(errs.ConfigInvalid, "stt", "le nombre maximal de segments doit être inférieur ou égal à 65536")
+	}
+	if options.MaxSegments == 0 {
+		options.MaxSegments = DefaultMaxSegments
+	}
+	responseSlots := options.MaxTextBytes / MaxResponseBytes
+	if options.MaxTextBytes%MaxResponseBytes != 0 {
+		responseSlots++
+	}
+	if responseSlots < 1 {
+		responseSlots = 1
+	}
+	if options.Workers > responseSlots {
+		options.Workers = responseSlots
+	}
 	return &Chain{primary: primary, fallback: fallback, options: options}, nil
 }
 
 func (c *Chain) Name() string { return c.primary.Name() }
 
+func (c *Chain) ValidateSegmentCount(count int) error {
+	if count > c.options.MaxSegments {
+		return newTranscriptLimitError(SegmentLimitExceeded, c.primary.Name())
+	}
+	return nil
+}
+
 func (c *Chain) Transcribe(ctx context.Context, request Request) (Result, error) {
+	budget := newTextBudget(c.options.MaxTextBytes)
 	result, primaryErr := invoke(ctx, c.primary, request)
 	if primaryErr == nil {
+		if err := budget.add(result.Text, c.primary.Name()); err != nil {
+			return Result{}, err
+		}
 		return result, nil
 	}
 	if c.fallback == nil || errs.Classify(primaryErr) == errs.Cancelled {
@@ -137,24 +239,34 @@ func (c *Chain) Transcribe(ctx context.Context, request Request) (Result, error)
 	if fallbackErr != nil {
 		return Result{}, failedAttempts(c.primary, c.fallback, primaryErr, fallbackErr)
 	}
+	if err := budget.add(result.Text, c.fallback.Name()); err != nil {
+		return Result{}, err
+	}
 	result.Warnings = append(result.Warnings, fallbackWarning(c.primary, primaryErr))
 	return result, nil
 }
 
-func (c *Chain) TranscribeSegments(ctx context.Context, segments []Segment) (MultiResult, error) {
+func (c *Chain) TranscribeSegments(ctx context.Context, segments []Segment, progress Progress) (MultiResult, error) {
+	if err := c.ValidateSegmentCount(len(segments)); err != nil {
+		return MultiResult{}, err
+	}
 	ordered, err := validateSegments(segments)
 	if err != nil {
 		return MultiResult{}, err
 	}
 	if c.options.AllowMixedProviders {
-		return c.transcribeMixed(ctx, ordered)
+		return c.transcribeMixed(ctx, ordered, progress, newTextBudget(c.options.MaxTextBytes))
 	}
 
-	results, primaryErr := transcribeWith(ctx, c.primary, ordered, c.options.AllowPartial && c.fallback == nil)
+	budget := newTextBudget(c.options.MaxTextBytes)
+	results, primaryErr := transcribeWith(ctx, c.primary, ordered, c.options.AllowPartial && c.fallback == nil, progress, budget)
 	if primaryErr == nil {
 		return assemble(results, len(ordered), nil), nil
 	}
 	if errs.Classify(primaryErr) == errs.Cancelled {
+		return MultiResult{}, primaryErr
+	}
+	if isTranscriptLimitError(primaryErr) {
 		return MultiResult{}, primaryErr
 	}
 	if c.fallback == nil {
@@ -164,7 +276,11 @@ func (c *Chain) TranscribeSegments(ctx context.Context, segments []Segment) (Mul
 		return MultiResult{}, failedAttempt(c.primary, primaryErr)
 	}
 
-	results, fallbackErr := transcribeWith(ctx, c.fallback, ordered, c.options.AllowPartial)
+	results = nil
+	results, fallbackErr := transcribeWith(ctx, c.fallback, ordered, c.options.AllowPartial, progress, budget)
+	if isTranscriptLimitError(fallbackErr) {
+		return MultiResult{}, fallbackErr
+	}
 	if fallbackErr == nil {
 		return assemble(results, len(ordered), []Warning{fallbackWarning(c.primary, primaryErr)}), nil
 	}
@@ -179,8 +295,11 @@ func (c *Chain) TranscribeSegments(ctx context.Context, segments []Segment) (Mul
 
 // TranscribeStream consumes segments while they are produced. Provider calls
 // are bounded by Workers and final results are always assembled by segment index.
+// The caller retains ownership of input and must stop its producer after return;
+// the chain never detaches a drain goroutine.
 func (c *Chain) TranscribeStream(ctx context.Context, input <-chan Segment, progress Progress) (MultiResult, error) {
-	segments, primaryResults, primaryErr := transcribeStreamWith(ctx, c.primary, input, c.options.Workers, progress)
+	budget := newTextBudget(c.options.MaxTextBytes)
+	segments, primaryResults, primaryErr := transcribeStreamWith(ctx, c.primary, input, c.options.Workers, c.options.MaxSegments, progress, budget)
 	if len(segments) == 0 {
 		if primaryErr != nil {
 			return MultiResult{}, primaryErr
@@ -197,8 +316,11 @@ func (c *Chain) TranscribeStream(ctx context.Context, input <-chan Segment, prog
 	if errs.Classify(primaryErr) == errs.Cancelled {
 		return MultiResult{}, primaryErr
 	}
+	if isTranscriptLimitError(primaryErr) {
+		return MultiResult{}, primaryErr
+	}
 	if c.options.AllowMixedProviders {
-		return c.finishMixedStream(ctx, ordered, primaryResults, primaryErr, progress)
+		return c.finishMixedStream(ctx, ordered, primaryResults, primaryErr, progress, budget)
 	}
 	if c.fallback == nil {
 		if c.options.AllowPartial && len(primaryResults) > 0 {
@@ -206,7 +328,11 @@ func (c *Chain) TranscribeStream(ctx context.Context, input <-chan Segment, prog
 		}
 		return MultiResult{}, failedAttempt(c.primary, primaryErr)
 	}
-	fallbackResults, fallbackErr := transcribeBatchWith(ctx, c.fallback, ordered, c.options.Workers, progress)
+	primaryResults = nil
+	fallbackResults, fallbackErr := transcribeBatchWith(ctx, c.fallback, ordered, c.options.Workers, progress, budget)
+	if isTranscriptLimitError(fallbackErr) {
+		return MultiResult{}, fallbackErr
+	}
 	if fallbackErr == nil {
 		return assemble(orderedResults(fallbackResults), len(ordered), []Warning{fallbackWarning(c.primary, primaryErr)}), nil
 	}
@@ -218,7 +344,7 @@ func (c *Chain) TranscribeStream(ctx context.Context, input <-chan Segment, prog
 	return MultiResult{}, failedAttempts(c.primary, c.fallback, primaryErr, fallbackErr)
 }
 
-func (c *Chain) finishMixedStream(ctx context.Context, segments []Segment, primary map[int]SegmentResult, primaryErr error, progress Progress) (MultiResult, error) {
+func (c *Chain) finishMixedStream(ctx context.Context, segments []Segment, primary map[int]SegmentResult, primaryErr error, progress Progress, budget *textBudget) (MultiResult, error) {
 	if c.fallback == nil {
 		if c.options.AllowPartial && len(primary) > 0 {
 			return assemble(orderedResults(primary), len(segments), []Warning{partialWarning(c.primary, primaryErr)}), nil
@@ -231,7 +357,10 @@ func (c *Chain) finishMixedStream(ctx context.Context, segments []Segment, prima
 			failed = append(failed, segment)
 		}
 	}
-	fallback, fallbackErr := transcribeBatchWith(ctx, c.fallback, failed, c.options.Workers, progress)
+	fallback, fallbackErr := transcribeBatchWith(ctx, c.fallback, failed, c.options.Workers, progress, budget)
+	if isTranscriptLimitError(fallbackErr) {
+		return MultiResult{}, fallbackErr
+	}
 	if fallbackErr != nil && (!c.options.AllowPartial || errs.Classify(fallbackErr) == errs.Cancelled) {
 		return MultiResult{}, failedAttempts(c.primary, c.fallback, primaryErr, fallbackErr)
 	}
@@ -256,25 +385,49 @@ func (c *Chain) finishMixedStream(ctx context.Context, segments []Segment, prima
 }
 
 type streamOutcome struct {
-	segment Segment
-	result  SegmentResult
-	err     error
+	result SegmentResult
+	err    error
 }
 
-func transcribeStreamWith(ctx context.Context, provider Provider, input <-chan Segment, workers int, progress Progress) ([]Segment, map[int]SegmentResult, error) {
+func transcribeStreamWith(ctx context.Context, provider Provider, input <-chan Segment, workers, maxSegments int, progress Progress, budget *textBudget) ([]Segment, map[int]SegmentResult, error) {
+	workCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	jobs := make(chan Segment)
 	var workerGroup sync.WaitGroup
 	var mu sync.Mutex
-	var outcomes []streamOutcome
+	results := make(map[int]SegmentResult)
+	var firstErr error
+	firstErrIndex := 0
 	workerGroup.Add(workers)
 	for range workers {
 		go func() {
 			defer workerGroup.Done()
-			for segment := range jobs {
-				outcome := transcribeOne(ctx, provider, segment, progress)
+			for {
+				var segment Segment
+				var ok bool
+				select {
+				case <-workCtx.Done():
+					return
+				case segment, ok = <-jobs:
+					if !ok {
+						return
+					}
+				}
+				if err := workCtx.Err(); err != nil {
+					return
+				}
+				outcome := transcribeOne(workCtx, provider, segment, progress, budget)
 				mu.Lock()
-				outcomes = append(outcomes, outcome)
+				if outcome.err == nil {
+					results[segment.Index] = outcome.result
+				} else if firstErr == nil || segment.Index < firstErrIndex {
+					firstErr = outcome.err
+					firstErrIndex = segment.Index
+				}
 				mu.Unlock()
+				if isTranscriptLimitError(outcome.err) {
+					cancel(outcome.err)
+				}
 			}
 		}()
 	}
@@ -282,77 +435,70 @@ func transcribeStreamWith(ctx context.Context, provider Provider, input <-chan S
 consume:
 	for {
 		select {
-		case <-ctx.Done():
+		case <-workCtx.Done():
 			break consume
 		case segment, ok := <-input:
 			if !ok {
 				break consume
 			}
+			if len(segments) == maxSegments {
+				cancel(newTranscriptLimitError(SegmentLimitExceeded, provider.Name()))
+				break consume
+			}
 			segments = append(segments, segment)
 			select {
 			case jobs <- segment:
-			case <-ctx.Done():
+			case <-workCtx.Done():
 				break consume
 			}
 		}
 	}
 	close(jobs)
 	workerGroup.Wait()
+	if cause := context.Cause(workCtx); isTranscriptLimitError(cause) {
+		return segments, nil, cause
+	}
 	if err := ctx.Err(); err != nil {
 		return segments, nil, err
 	}
-	return collectOutcomes(outcomes)
+	_, err := validateSegments(segments)
+	if err != nil {
+		return segments, results, err
+	}
+	return segments, results, firstErr
 }
 
-func transcribeBatchWith(ctx context.Context, provider Provider, segments []Segment, workers int, progress Progress) (map[int]SegmentResult, error) {
+func transcribeBatchWith(ctx context.Context, provider Provider, segments []Segment, workers int, progress Progress, budget *textBudget) (map[int]SegmentResult, error) {
 	input := make(chan Segment, len(segments))
 	for _, segment := range segments {
 		input <- segment
 	}
 	close(input)
-	_, results, err := transcribeStreamWith(ctx, provider, input, workers, progress)
+	_, results, err := transcribeStreamWith(ctx, provider, input, workers, len(segments), progress, budget)
 	return results, err
 }
 
-func transcribeOne(ctx context.Context, provider Provider, segment Segment, progress Progress) streamOutcome {
+func transcribeOne(ctx context.Context, provider Provider, segment Segment, progress Progress, budget *textBudget) streamOutcome {
+	if err := ctx.Err(); err != nil {
+		return streamOutcome{err: err}
+	}
 	if progress.Started != nil {
 		progress.Started(segment.Index, provider.Name())
 	}
 	result, err := invoke(ctx, provider, segment.Request)
+	if err == nil {
+		err = budget.add(result.Text, provider.Name())
+	}
 	if err != nil {
 		if progress.Failed != nil {
 			progress.Failed(segment.Index, provider.Name(), errs.Classify(err))
 		}
-		return streamOutcome{segment: segment, err: err}
+		return streamOutcome{err: err}
 	}
 	if progress.Done != nil {
 		progress.Done(segment.Index, result.Provider)
 	}
-	return streamOutcome{segment: segment, result: SegmentResult{Index: segment.Index, Text: result.Text, Provider: result.Provider}}
-}
-
-func collectOutcomes(outcomes []streamOutcome) ([]Segment, map[int]SegmentResult, error) {
-	segments := make([]Segment, 0, len(outcomes))
-	results := make(map[int]SegmentResult, len(outcomes))
-	errorsByIndex := make(map[int]error)
-	for _, outcome := range outcomes {
-		segments = append(segments, outcome.segment)
-		if outcome.err != nil {
-			errorsByIndex[outcome.segment.Index] = outcome.err
-		} else {
-			results[outcome.segment.Index] = outcome.result
-		}
-	}
-	ordered, err := validateSegments(segments)
-	if err != nil {
-		return segments, results, err
-	}
-	for _, segment := range ordered {
-		if err := errorsByIndex[segment.Index]; err != nil {
-			return segments, results, err
-		}
-	}
-	return segments, results, nil
+	return streamOutcome{result: SegmentResult{Index: segment.Index, Text: result.Text, Provider: result.Provider}}
 }
 
 func orderedResults(results map[int]SegmentResult) []SegmentResult {
@@ -371,17 +517,29 @@ func orderedResults(results map[int]SegmentResult) []SegmentResult {
 	return ordered
 }
 
-func (c *Chain) transcribeMixed(ctx context.Context, segments []Segment) (MultiResult, error) {
+func (c *Chain) transcribeMixed(ctx context.Context, segments []Segment, progress Progress, budget *textBudget) (MultiResult, error) {
 	results := make([]SegmentResult, 0, len(segments))
 	providers := make(map[string]struct{})
 	partial := false
+	var partialProvider Provider
+	var partialErr error
 	var warnings []Warning
 	fallbackUsed := false
 	for _, segment := range segments {
-		result, err := invoke(ctx, c.primary, segment.Request)
+		failedProvider := c.primary
+		outcome := transcribeOne(ctx, c.primary, segment, progress, budget)
+		err := outcome.err
+		if isTranscriptLimitError(err) {
+			return MultiResult{}, err
+		}
 		if err != nil && c.fallback != nil && errs.Classify(err) != errs.Cancelled {
 			primaryErr := err
-			result, err = invoke(ctx, c.fallback, segment.Request)
+			failedProvider = c.fallback
+			outcome = transcribeOne(ctx, c.fallback, segment, progress, budget)
+			err = outcome.err
+			if isTranscriptLimitError(err) {
+				return MultiResult{}, err
+			}
 			if err == nil && !fallbackUsed {
 				warnings = append(warnings, fallbackWarning(c.primary, primaryErr))
 				fallbackUsed = true
@@ -394,10 +552,14 @@ func (c *Chain) transcribeMixed(ctx context.Context, segments []Segment) (MultiR
 				return MultiResult{}, failedAttempt(c.primary, err)
 			}
 			partial = true
+			if partialErr == nil {
+				partialProvider = failedProvider
+				partialErr = err
+			}
 			continue
 		}
-		providers[result.Provider] = struct{}{}
-		results = append(results, SegmentResult{Index: segment.Index, Text: result.Text, Provider: result.Provider})
+		providers[outcome.result.Provider] = struct{}{}
+		results = append(results, outcome.result)
 	}
 	if len(results) == 0 {
 		return MultiResult{}, errs.New(errs.EmptyResponse, "stt", "aucun segment n'a produit de transcription")
@@ -406,26 +568,27 @@ func (c *Chain) transcribeMixed(ctx context.Context, segments []Segment) (MultiR
 		warnings = append(warnings, Warning{Class: errs.Unavailable, Component: "stt", Message: WarningMixedProviders})
 	}
 	if partial {
-		warnings = append(warnings, Warning{Class: errs.ServerError, Component: "stt", Message: WarningPartial})
+		warnings = append(warnings, partialWarning(partialProvider, partialErr))
 	}
 	return assemble(results, len(segments), warnings), nil
 }
 
-func transcribeWith(ctx context.Context, provider Provider, segments []Segment, continueOnError bool) ([]SegmentResult, error) {
+func transcribeWith(ctx context.Context, provider Provider, segments []Segment, continueOnError bool, progress Progress, budget *textBudget) ([]SegmentResult, error) {
 	results := make([]SegmentResult, 0, len(segments))
 	var firstErr error
 	for _, segment := range segments {
-		result, err := invoke(ctx, provider, segment.Request)
+		outcome := transcribeOne(ctx, provider, segment, progress, budget)
+		err := outcome.err
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
-			if !continueOnError || errs.Classify(err) == errs.Cancelled {
+			if !continueOnError || errs.Classify(err) == errs.Cancelled || isTranscriptLimitError(err) {
 				break
 			}
 			continue
 		}
-		results = append(results, SegmentResult{Index: segment.Index, Text: result.Text, Provider: result.Provider})
+		results = append(results, outcome.result)
 	}
 	return results, firstErr
 }
@@ -478,7 +641,9 @@ func assemble(results []SegmentResult, total int, warnings []Warning) MultiResul
 		providers[result.Provider] = struct{}{}
 	}
 	provider := ""
-	if len(providers) == 1 {
+	if len(providers) > 1 {
+		provider = ProviderMixed
+	} else if len(providers) == 1 {
 		for name := range providers {
 			provider = name
 		}
@@ -528,6 +693,10 @@ func failedAttempts(primary, fallback Provider, primaryErr, fallbackErr error) e
 }
 
 func ProviderFromError(err error) string {
+	var limit *transcriptLimitError
+	if errors.As(err, &limit) {
+		return limit.provider
+	}
 	var attempts *providerAttemptsError
 	if errors.As(err, &attempts) {
 		return attempts.effective

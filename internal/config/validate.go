@@ -5,9 +5,25 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"git.2027a.net/mathieu/murmur/internal/errs"
+	"git.2027a.net/mathieu/murmur/internal/httpurl"
+)
+
+const (
+	MaximumChunkWorkers             = 64
+	MaximumTextBytes                = 64 << 20
+	MaximumSegments                 = 65536
+	MaximumDurationSeconds          = 24 * 60 * 60
+	MaximumDurationMilliseconds     = MaximumDurationSeconds * 1000
+	MaximumProviderRetries          = 10
+	MaximumRetryBackoffMilliseconds = 60 * 1000
+	MaximumLogBytes                 = 16 << 20
+	MaximumLogFiles                 = 10
+	MaximumSessionJournalBytes      = 1 << 30
+	MaximumSessionJournalFiles      = 100
 )
 
 func Validate(cfg Config) error {
@@ -17,20 +33,26 @@ func Validate(cfg Config) error {
 	if !oneOf(cfg.General.CommandPack, "auto", "fr", "en") {
 		return configError("general.command_pack doit valoir auto, fr ou en")
 	}
-	if cfg.STT.ChunkSeconds < 0 {
-		return configError("stt.chunk_seconds ne peut pas être négatif")
+	if cfg.STT.ChunkSeconds < 0 || cfg.STT.ChunkSeconds > MaximumDurationSeconds {
+		return configError("stt.chunk_seconds doit être compris entre 0 et 86400")
 	}
 	if cfg.STT.LiveChunking && cfg.STT.ChunkSeconds == 0 {
 		return configError("stt.live_chunking exige stt.chunk_seconds strictement positif")
 	}
-	if cfg.STT.ChunkWorkers < 1 || cfg.STT.ChunkWorkers > 64 {
+	if cfg.STT.ChunkWorkers < 1 || cfg.STT.ChunkWorkers > MaximumChunkWorkers {
 		return configError("stt.chunk_workers doit être compris entre 1 et 64")
+	}
+	if cfg.STT.MaxTextBytes < 1 || cfg.STT.MaxTextBytes > MaximumTextBytes {
+		return configError("stt.max_text_bytes doit être compris entre 1 et 67108864")
+	}
+	if cfg.STT.MaxSegments < 1 || cfg.STT.MaxSegments > MaximumSegments {
+		return configError("stt.max_segments doit être compris entre 1 et 65536")
 	}
 	if !oneOf(cfg.Plugin.Mode, "plain", "markdown") {
 		return configError("plugin.mode doit valoir plain ou markdown")
 	}
-	if cfg.Plugin.TimeoutS <= 0 {
-		return configError("plugin.timeout_s doit être strictement positif")
+	if cfg.Plugin.TimeoutS < 1 || cfg.Plugin.TimeoutS > MaximumDurationSeconds {
+		return configError("plugin.timeout_s doit être compris entre 1 et 86400")
 	}
 	if !oneOf(cfg.Sink.Mode, "paste", "type", "clipboard", "stdout", "file", "auto") {
 		return configError("sink.mode invalide")
@@ -41,8 +63,20 @@ func Validate(cfg Config) error {
 	if !oneOf(cfg.Sink.ClipboardMode, "raw-and-clean", "clean-only", "none", "transient") {
 		return configError("sink.clipboard_mode invalide")
 	}
-	if !oneOf(cfg.Sink.TypeNewlines, "keep", "space", "marker") {
-		return configError("sink.type_newlines doit valoir keep, space ou marker")
+	if cfg.Sink.Mode == "clipboard" && !oneOf(cfg.Sink.ClipboardMode, "raw-and-clean", "clean-only") {
+		return configError("sink.mode=clipboard exige sink.clipboard_mode raw-and-clean ou clean-only")
+	}
+	for i, shortcut := range cfg.Sink.PasteShortcuts {
+		if !oneOf(shortcut, "ctrl+shift+v", "shift+insert", "ctrl+v") {
+			return configError(fmt.Sprintf("sink.paste_shortcuts[%d] contient un raccourci inconnu: %q", i, shortcut))
+		}
+	}
+	effectivePaste := cfg.Sink.Mode == "paste" || (cfg.Sink.Mode == "auto" && cfg.Sink.AutoMode == "paste")
+	if effectivePaste && cfg.Sink.ClipboardMode == "transient" && len(cfg.Sink.PasteShortcuts) > 0 {
+		return configError("sink.clipboard_mode=transient est incompatible avec un sink effectif paste: wtype ne confirme pas la consommation du collage")
+	}
+	if !oneOf(cfg.Sink.TypeNewlines, "space", "marker", "dangerous-keep") {
+		return configError("sink.type_newlines doit valoir space, marker ou dangerous-keep")
 	}
 	if cfg.Sink.Mode == "file" && strings.TrimSpace(cfg.Sink.File) == "" {
 		return configError("sink.file est obligatoire lorsque sink.mode vaut file")
@@ -56,16 +90,23 @@ func Validate(cfg Config) error {
 	if !oneOf(cfg.UI.OSD.Position, "top-left", "top-center", "center") {
 		return configError("ui.osd.position doit valoir top-left, top-center ou center")
 	}
-	if cfg.UI.OSD.SuccessTimeoutMS < 0 || cfg.UI.OSD.ErrorTimeoutMS < 0 {
-		return configError("les délais ui.osd ne peuvent pas être négatifs")
+	if cfg.UI.OSD.SuccessTimeoutMS < 0 || cfg.UI.OSD.SuccessTimeoutMS > MaximumDurationMilliseconds ||
+		cfg.UI.OSD.ErrorTimeoutMS < 0 || cfg.UI.OSD.ErrorTimeoutMS > MaximumDurationMilliseconds {
+		return configError("les délais ui.osd doivent être compris entre 0 et 86400000 ms")
 	}
 	if !oneOf(cfg.Logging.Level, "debug", "info", "warn", "error") {
 		return configError("logging.level doit valoir debug, info, warn ou error")
 	}
-	if cfg.Logging.SessionMaxBytes < 1024 {
-		return configError("logging.session_max_bytes doit être supérieur ou égal à 1024")
+	if cfg.Logging.MaxBytes < 1024 || cfg.Logging.MaxBytes > MaximumLogBytes {
+		return configError("logging.max_bytes doit être compris entre 1024 et 16777216")
 	}
-	if cfg.Logging.SessionMaxFiles < 1 || cfg.Logging.SessionMaxFiles > 100 {
+	if cfg.Logging.MaxFiles < 1 || cfg.Logging.MaxFiles > MaximumLogFiles {
+		return configError("logging.max_files doit être compris entre 1 et 10")
+	}
+	if cfg.Logging.SessionMaxBytes < 1024 || cfg.Logging.SessionMaxBytes > MaximumSessionJournalBytes {
+		return configError("logging.session_max_bytes doit être compris entre 1024 et 1073741824")
+	}
+	if cfg.Logging.SessionMaxFiles < 1 || cfg.Logging.SessionMaxFiles > MaximumSessionJournalFiles {
 		return configError("logging.session_max_files doit être compris entre 1 et 100")
 	}
 	if err := validateZoneList("policy.stt_zones", cfg.Policy.STTZones); err != nil {
@@ -164,28 +205,41 @@ func ValidateClipboardOnly(cfg Config, enabled bool) error {
 }
 
 func validateProvider(path string, provider ProviderConfig) error {
+	if strings.TrimSpace(provider.Model) == "" {
+		return configError(path + ".model ne peut pas être vide")
+	}
 	if err := validateHTTPProvider(path, provider.Type, provider.BaseURL, provider.TimeoutS, provider.Zone, provider.AllowInsecure, provider.credentials()); err != nil {
 		return err
 	}
-	if provider.Retries < 0 || provider.Retries > 10 {
+	if provider.Retries < 0 || provider.Retries > MaximumProviderRetries {
 		return configError(path + ".retries doit être compris entre 0 et 10")
 	}
-	if provider.RetryBackoffMS < 0 || provider.RetryBackoffMS > 60000 {
+	if provider.RetryBackoffMS < 0 || provider.RetryBackoffMS > MaximumRetryBackoffMilliseconds {
 		return configError(path + ".retry_backoff_ms doit être compris entre 0 et 60000")
 	}
 	if provider.HealthEnabled && strings.TrimSpace(provider.HealthEndpoint) == "" {
 		return configError(path + ".health_endpoint est obligatoire lorsque health_enabled vaut true")
 	}
 	if provider.HealthEndpoint != "" {
-		endpoint, err := url.Parse(provider.HealthEndpoint)
-		if err != nil || endpoint.User != nil || endpoint.Fragment != "" || (endpoint.IsAbs() && endpoint.Scheme != "http" && endpoint.Scheme != "https") {
+		base, _ := url.Parse(provider.BaseURL)
+		endpoint, err := httpurl.ResolveEndpoint(base, provider.HealthEndpoint)
+		if err != nil {
 			return configError(path + ".health_endpoint doit être une URL HTTP(S) ou un chemin valide, sans userinfo ni fragment")
+		}
+		if provider.Zone == "internet" && endpoint.Scheme != "https" && !provider.AllowInsecure {
+			return configError(path + ".health_endpoint doit utiliser HTTPS en zone internet, sauf allow_insecure=true")
+		}
+		if !httpurl.SameOrigin(base, endpoint) {
+			return configError(path + ".health_endpoint doit conserver la même origine que base_url")
 		}
 	}
 	return nil
 }
 
 func validateCleanupProvider(path string, provider CleanupProviderConfig) error {
+	if strings.TrimSpace(provider.Model) == "" {
+		return configError(path + ".model ne peut pas être vide")
+	}
 	return validateHTTPProvider(path, provider.Type, provider.BaseURL, provider.TimeoutS, provider.Zone, provider.AllowInsecure, provider.credentials())
 }
 
@@ -193,14 +247,20 @@ func validateHTTPProvider(path, providerType, baseURL string, timeoutS int, zone
 	if providerType != "openai-compatible" {
 		return configError(path + ".type doit valoir openai-compatible")
 	}
-	if timeoutS <= 0 {
-		return configError(path + ".timeout_s doit être strictement positif")
+	if timeoutS < 1 || timeoutS > MaximumDurationSeconds {
+		return configError(path + ".timeout_s doit être compris entre 1 et 86400")
 	}
 	if !oneOf(zone, "local", "lan", "internet") {
 		return configError(path + ".zone doit valoir local, lan ou internet")
 	}
 	if secretSourceCount(credentials) > 1 {
 		return configError(path + " ne peut définir qu'une source parmi api_key_env, api_key_file et api_key_command")
+	}
+	if credentials.APIKeyFile != "" && !filepath.IsAbs(credentials.APIKeyFile) {
+		return configError(path + ".api_key_file doit être un chemin absolu")
+	}
+	if len(credentials.APIKeyCommand) > 0 && credentials.APIKeyCommand[0] == "" {
+		return configError(path + ".api_key_command doit commencer par un exécutable non vide")
 	}
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") ||

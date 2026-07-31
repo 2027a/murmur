@@ -30,16 +30,17 @@
     "segment_count": { "type": "integer", "minimum": 0 },
     "segments": {
       "type": "array",
+      "uniqueItems": true,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["index", "provider", "model", "language", "transcript"],
         "properties": {
           "index": { "type": "integer", "minimum": 0 },
-          "provider": { "type": "string" },
+          "provider": { "type": "string", "minLength": 1 },
           "model": { "type": "string" },
           "language": { "type": "string" },
-          "transcript": { "type": "string" }
+          "transcript": { "type": "string", "minLength": 1 }
         }
       }
     },
@@ -52,8 +53,8 @@
         "properties": {
           "class": { "$ref": "#/$defs/optionalErrorClass" },
           "provider": { "type": "string" },
-          "component": { "type": "string" },
-          "message": { "type": "string" }
+          "component": { "type": "string", "minLength": 1 },
+          "message": { "type": "string", "minLength": 1 }
         }
       }
     },
@@ -61,19 +62,77 @@
       "oneOf": [
         { "type": "null" },
         {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["class", "component", "message"],
-          "properties": {
-            "class": { "$ref": "#/$defs/errorClass" },
-            "component": { "type": "string" },
-            "message": { "type": "string" }
-          }
+          "$ref": "#/$defs/error"
         }
       ]
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "success": { "const": true } },
+        "required": ["success"]
+      },
+      "then": {
+        "properties": { "error": { "type": "null" } }
+      },
+      "else": {
+        "properties": { "error": { "$ref": "#/$defs/error" } }
+      }
+    },
+    {
+      "if": {
+        "properties": { "command": { "const": "cleanup" } },
+        "required": ["command"]
+      },
+      "then": {
+        "properties": {
+          "language": { "const": "" },
+          "segment_count": { "const": 0 },
+          "segments": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": { "enum": ["transcribe", "dictate"] },
+          "success": { "const": true }
+        },
+        "required": ["command", "success"]
+      },
+      "then": {
+        "properties": {
+          "segment_count": { "minimum": 1 },
+          "segments": { "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "provider": { "const": "mixed" } },
+        "required": ["provider"]
+      },
+      "then": {
+        "properties": {
+          "model": { "const": "" },
+          "language": { "const": "" },
+          "segments": { "minItems": 2 }
+        }
+      }
+    }
+  ],
   "$defs": {
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "component", "message"],
+      "properties": {
+        "class": { "$ref": "#/$defs/errorClass" },
+        "component": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
     "errorClass": {
       "type": "string",
       "enum": [

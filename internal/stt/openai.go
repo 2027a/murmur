@@ -3,26 +3,26 @@ package stt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"git.2027a.net/mathieu/murmur/internal/errs"
+	"git.2027a.net/mathieu/murmur/internal/httpurl"
 	"git.2027a.net/mathieu/murmur/internal/policy"
 )
 
-const maxResponseBytes = 4 << 20
+const MaxResponseBytes = 4 << 20
 
 type OpenAICompatible struct {
 	name           string
-	baseURL        string
 	endpoint       string
 	model          string
 	language       string
@@ -42,6 +42,9 @@ func NewOpenAICompatible(config Config) (*OpenAICompatible, error) {
 		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, errs.New(errs.ConfigInvalid, "stt", "base_url doit être une URL HTTP(S) absolue")
 	}
+	if config.AllowedZone == policy.Internet && parsed.Scheme != "https" && !config.AllowInsecure {
+		return nil, errs.New(errs.ConfigInvalid, "stt", "base_url doit utiliser HTTPS en zone internet, sauf allow_insecure=true")
+	}
 	if strings.TrimSpace(config.Name) == "" {
 		return nil, errs.New(errs.ConfigInvalid, "stt", "nom de provider manquant")
 	}
@@ -57,6 +60,23 @@ func NewOpenAICompatible(config Config) (*OpenAICompatible, error) {
 	if config.HealthEnabled && strings.TrimSpace(config.HealthEndpoint) == "" {
 		return nil, errs.New(errs.ConfigInvalid, "stt", "health_endpoint est obligatoire lorsque health est activé")
 	}
+	healthEndpoint := ""
+	if config.HealthEndpoint != "" {
+		resolved, err := httpurl.ResolveEndpoint(parsed, config.HealthEndpoint)
+		if err != nil {
+			return nil, errs.Wrap(errs.ConfigInvalid, "stt", "health_endpoint invalide", err)
+		}
+		if config.AllowedZone == policy.Internet && resolved.Scheme != "https" && !config.AllowInsecure {
+			return nil, errs.New(errs.ConfigInvalid, "stt", "health_endpoint doit utiliser HTTPS en zone internet, sauf allow_insecure=true")
+		}
+		if !httpurl.SameOrigin(parsed, resolved) {
+			return nil, errs.New(errs.ConfigInvalid, "stt", "health_endpoint doit conserver la même origine que base_url")
+		}
+		healthEndpoint = resolved.String()
+	}
+	if strings.TrimSpace(config.Model) == "" {
+		return nil, errs.New(errs.ConfigInvalid, "stt", "modèle manquant")
+	}
 
 	transport := policy.TransportWithTrusted(config.AllowedZone, config.TrustedNetworks)
 	endpoint, err := url.JoinPath(parsed.String(), "audio/transcriptions")
@@ -65,7 +85,6 @@ func NewOpenAICompatible(config Config) (*OpenAICompatible, error) {
 	}
 	return &OpenAICompatible{
 		name:           config.Name,
-		baseURL:        parsed.String(),
 		endpoint:       endpoint,
 		model:          config.Model,
 		language:       config.Language,
@@ -73,7 +92,7 @@ func NewOpenAICompatible(config Config) (*OpenAICompatible, error) {
 		apiKey:         strings.TrimSpace(config.APIKey),
 		timeout:        config.Timeout,
 		healthEnabled:  config.HealthEnabled,
-		healthEndpoint: config.HealthEndpoint,
+		healthEndpoint: healthEndpoint,
 		retries:        config.Retries,
 		retryBackoff:   config.RetryBackoff,
 		client: &http.Client{
@@ -112,7 +131,7 @@ func (p *OpenAICompatible) Transcribe(ctx context.Context, request Request) (Res
 }
 
 func (p *OpenAICompatible) transcribeOnce(ctx context.Context, request Request) (Result, bool, error) {
-	file, err := os.Open(request.Audio.Path())
+	file, handle, err := request.Audio.OpenRIFF()
 	if err != nil {
 		return Result{}, false, errs.Wrap(errs.AudioFailed, "stt", "fichier audio inaccessible", err)
 	}
@@ -127,8 +146,7 @@ func (p *OpenAICompatible) transcribeOnce(ctx context.Context, request Request) 
 	body := &countingReadCloser{ReadCloser: pipeReader, count: &bodyBytes}
 	writeDone := make(chan error, 1)
 	go func() {
-		writeErr := writeTranscriptionBody(multipartWriter, file, filename, request, p)
-		file.Close()
+		writeErr := errors.Join(writeTranscriptionBody(multipartWriter, file, filename, request, p), handle.Close())
 		if writeErr != nil {
 			pipeWriter.CloseWithError(writeErr)
 		} else {
@@ -154,16 +172,17 @@ func (p *OpenAICompatible) transcribeOnce(ctx context.Context, request Request) 
 	if requestErr != nil {
 		return Result{}, bodyBytes.Load() == 0, classifyTransportError("stt", requestErr)
 	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		classified := classifyStatus("stt", response.StatusCode)
+		safeRetry := (response.StatusCode >= 500 && response.StatusCode < 600) || response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooManyRequests
+		drainAndClose(response.Body)
+		return Result{}, safeRetry, classified
+	}
 	defer response.Body.Close()
 
 	data, err := readBounded(response.Body)
 	if err != nil {
 		return Result{}, false, errs.Wrap(errs.ServerError, "stt", "lecture de la réponse impossible", err)
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		classified := classifyStatus("stt", response.StatusCode)
-		safeRetry := response.StatusCode >= 500 || response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooManyRequests
-		return Result{}, safeRetry, classified
 	}
 	var payload struct {
 		Text string `json:"text"`
@@ -175,7 +194,7 @@ func (p *OpenAICompatible) transcribeOnce(ctx context.Context, request Request) 
 	if payload.Text == "" {
 		return Result{}, false, errs.New(errs.EmptyResponse, "stt", "le provider n'a renvoyé aucun texte")
 	}
-	return Result{Text: payload.Text, Provider: p.name, Raw: append(json.RawMessage(nil), data...)}, false, nil
+	return Result{Text: payload.Text, Provider: p.name, Raw: json.RawMessage(data)}, false, nil
 }
 
 func (p *OpenAICompatible) Health(ctx context.Context) error {
@@ -185,13 +204,9 @@ func (p *OpenAICompatible) Health(ctx context.Context) error {
 	if strings.TrimSpace(p.healthEndpoint) == "" {
 		return errs.New(errs.ConfigInvalid, "stt-health", "endpoint de health manquant")
 	}
-	endpoint, err := p.healthURL()
-	if err != nil {
-		return err
-	}
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.healthEndpoint, nil)
 	if err != nil {
 		return errs.Wrap(errs.ConfigInvalid, "stt-health", "endpoint de health invalide", err)
 	}
@@ -202,42 +217,19 @@ func (p *OpenAICompatible) Health(ctx context.Context) error {
 	if err != nil {
 		return classifyTransportError("stt-health", err)
 	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		classified := classifyStatus("stt-health", response.StatusCode)
+		drainAndClose(response.Body)
+		return classified
+	}
 	defer response.Body.Close()
 	if _, err := readBounded(response.Body); err != nil {
 		return errs.Wrap(errs.ServerError, "stt-health", "lecture de la réponse impossible", err)
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return classifyStatus("stt-health", response.StatusCode)
-	}
 	return nil
 }
 
-func (p *OpenAICompatible) healthURL() (string, error) {
-	endpoint, err := url.Parse(p.healthEndpoint)
-	if err != nil {
-		return "", errs.Wrap(errs.ConfigInvalid, "stt-health", "endpoint de health invalide", err)
-	}
-	if endpoint.IsAbs() {
-		if endpoint.Scheme != "http" && endpoint.Scheme != "https" {
-			return "", errs.New(errs.ConfigInvalid, "stt-health", "endpoint de health non HTTP(S)")
-		}
-		return endpoint.String(), nil
-	}
-	if strings.HasPrefix(p.healthEndpoint, "/") {
-		base, _ := url.Parse(p.baseURL)
-		base.Path = endpoint.Path
-		base.RawQuery = endpoint.RawQuery
-		base.Fragment = ""
-		return base.String(), nil
-	}
-	joined, err := url.JoinPath(p.baseURL, p.healthEndpoint)
-	if err != nil {
-		return "", errs.Wrap(errs.ConfigInvalid, "stt-health", "endpoint de health invalide", err)
-	}
-	return joined, nil
-}
-
-func writeTranscriptionBody(writer *multipart.Writer, file *os.File, filename string, request Request, provider *OpenAICompatible) error {
+func writeTranscriptionBody(writer *multipart.Writer, file io.Reader, filename string, request Request, provider *OpenAICompatible) error {
 	model := request.Model
 	if model == "" {
 		model = provider.model
@@ -284,14 +276,19 @@ func (r *countingReadCloser) Read(buffer []byte) (int, error) {
 }
 
 func readBounded(reader io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(reader, maxResponseBytes+1))
+	data, err := io.ReadAll(io.LimitReader(reader, MaxResponseBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > maxResponseBytes {
-		return nil, fmt.Errorf("réponse supérieure à %d octets", maxResponseBytes)
+	if len(data) > MaxResponseBytes {
+		return nil, fmt.Errorf("réponse supérieure à %d octets", MaxResponseBytes)
 	}
 	return data, nil
+}
+
+func drainAndClose(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, MaxResponseBytes))
+	_ = body.Close()
 }
 
 func classifyStatus(component string, status int) error {

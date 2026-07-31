@@ -69,6 +69,79 @@ func newCommandResult(command string) commandResult {
 	return commandResult{Version: 1, Command: command, Segments: []commandSegment{}, Warnings: []commandWarning{}}
 }
 
+func (r commandResult) validate() error {
+	if r.Version != 1 {
+		return fmt.Errorf("version de résultat invalide: %d", r.Version)
+	}
+	if r.Command != "transcribe" && r.Command != "cleanup" && r.Command != "dictate" {
+		return fmt.Errorf("commande de résultat invalide: %q", r.Command)
+	}
+	if r.Success != (r.Error == nil) {
+		return errors.New("success et error sont incohérents")
+	}
+	if r.Segments == nil || r.Warnings == nil {
+		return errors.New("segments et warnings doivent être des tableaux")
+	}
+	if r.SegmentCount != len(r.Segments) {
+		return fmt.Errorf("segment_count=%d pour %d segments", r.SegmentCount, len(r.Segments))
+	}
+	if r.Command == "cleanup" && len(r.Segments) != 0 {
+		return errors.New("cleanup ne peut pas contenir de segments STT")
+	}
+	if r.Command != "cleanup" && r.Success && len(r.Segments) == 0 {
+		return errors.New("une transcription réussie doit contenir au moins un segment")
+	}
+
+	type metadata struct {
+		model    string
+		language string
+	}
+	providers := make(map[string]metadata)
+	parts := make([]string, 0, len(r.Segments))
+	previousIndex := -1
+	for _, segment := range r.Segments {
+		if segment.Index <= previousIndex {
+			return fmt.Errorf("index de segment non strictement croissant: %d après %d", segment.Index, previousIndex)
+		}
+		previousIndex = segment.Index
+		if segment.Provider == "" || segment.Provider == stt.ProviderMixed {
+			return fmt.Errorf("provider de segment invalide à l'index %d", segment.Index)
+		}
+		text := strings.TrimSpace(segment.Transcript)
+		if text == "" {
+			return fmt.Errorf("transcript de segment vide à l'index %d", segment.Index)
+		}
+		parts = append(parts, text)
+		current := metadata{model: segment.Model, language: segment.Language}
+		if previous, ok := providers[segment.Provider]; ok && previous != current {
+			return fmt.Errorf("métadonnées incohérentes pour le provider %q", segment.Provider)
+		}
+		providers[segment.Provider] = current
+	}
+
+	if len(r.Segments) == 0 {
+		if r.Provider == stt.ProviderMixed {
+			return errors.New("provider mixed sans segments")
+		}
+		return nil
+	}
+	if r.TranscriptRaw != strings.Join(parts, " ") {
+		return errors.New("transcript_raw ne correspond pas aux segments")
+	}
+	if len(providers) > 1 {
+		if r.Provider != stt.ProviderMixed || r.Model != "" || r.Language != "" {
+			return errors.New("provenance globale incohérente pour des providers mixtes")
+		}
+		return nil
+	}
+	for provider, values := range providers {
+		if r.Provider != provider || r.Model != values.model || r.Language != values.language {
+			return errors.New("provenance globale incohérente avec les segments")
+		}
+	}
+	return nil
+}
+
 func (app App) transcribeCommand(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("transcribe", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -139,25 +212,43 @@ func (app App) cleanupCommand(ctx context.Context, args []string, stdout, stderr
 	return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, true)
 }
 
-func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+type dictateOptions struct {
+	sinkMode    string
+	jsonOutput  bool
+	eventOutput bool
+}
+
+func parseDictateOptions(args []string) (dictateOptions, error) {
+	options := dictateOptions{sinkMode: "stdout"}
 	flags := flag.NewFlagSet("dictate", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	sinkMode := flags.String("sink", "stdout", "sink stdout ou file")
-	jsonOutput := flags.Bool("json", false, "sortie JSON")
-	eventOutput := flags.Bool("events", false, "événements JSONL sur stderr")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || (*sinkMode != "stdout" && *sinkMode != "file") {
+	flags.StringVar(&options.sinkMode, "sink", options.sinkMode, "sink stdout ou file")
+	flags.BoolVar(&options.jsonOutput, "json", false, "sortie JSON")
+	flags.BoolVar(&options.eventOutput, "events", false, "événements JSONL sur stderr")
+	if err := flags.Parse(args); err != nil {
+		return dictateOptions{}, err
+	}
+	if flags.NArg() != 0 || (options.sinkMode != "stdout" && options.sinkMode != "file") {
+		return dictateOptions{}, errors.New("options dictate invalides")
+	}
+	return options, nil
+}
+
+func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	options, parseErr := parseDictateOptions(args)
+	if parseErr != nil {
 		return usageError(stderr, "usage invalide pour dictate")
 	}
-	emitter := newCommandEmitter(*eventOutput, stderr, "dictate")
+	emitter := newCommandEmitter(options.eventOutput, stderr, "dictate")
 	result := newCommandResult("dictate")
 	emitter.emit(events.SessionStarted, "starting", "", "", "", 0, 0, "")
 	none := "none"
 	noSound := false
 	cfg, err := app.resolve(config.Overrides{
-		SinkMode: sinkMode, ClipboardMode: &none, UIMode: &none, UISound: &noSound,
+		SinkMode: &options.sinkMode, ClipboardMode: &none, UIMode: &none, UISound: &noSound,
 	})
 	if err != nil {
-		return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, false)
+		return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
 	}
 	setConfiguredSTTMetadata(&result, cfg)
 	buildOptions := core.BuildOptions{BuildingProvider: func(provider string) {
@@ -165,35 +256,35 @@ func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr
 	}}
 	transcriber, err := core.BuildTranscriber(ctx, cfg, buildOptions)
 	if err != nil {
-		return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, false)
+		return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
 	}
 	processor, err := core.BuildProcessor(ctx, cfg, buildOptions)
 	if err != nil {
-		return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, false)
+		return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
 	}
 	runtimeDir, err := app.runtime()
 	if err != nil {
-		return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, false)
+		return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
 	}
 
 	captureCtx, cancelCapture := context.WithCancel(context.Background())
 	defer cancelCapture()
 	recorder := pwrecord.New(sysexec.OSExecutor{
-		Env: sysexec.FilterEnvironment(os.Environ(), config.APIKeyEnvironmentNames(cfg)),
+		Env: config.CredentialHelperEnvironment(cfg, os.Environ()),
 	})
 	recording, err := recorder.Start(captureCtx, audio.RecordOptions{
 		Directory: runtimeDir, Target: cfg.Audio.Source,
 		Retention: audio.RetentionOptions{Keep: cfg.Audio.KeepRecordings || cfg.Policy.RetainDiagnostics},
 	})
 	if err != nil {
-		return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, false)
+		return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
 	}
 	captureReady := false
 	select {
 	case err = <-recording.Ready():
 		if err != nil {
 			_ = recording.Abort()
-			return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, false)
+			return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
 		}
 		captureReady = true
 	case <-ctx.Done():
@@ -203,29 +294,23 @@ func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr
 	}
 
 	if ctx.Err() == nil {
-		stdinDone := make(chan struct{}, 1)
-		go func() {
-			_, _ = io.Copy(io.Discard, app.stdin())
-			stdinDone <- struct{}{}
-		}()
-		select {
-		case <-ctx.Done():
-		case <-stdinDone:
+		if err := app.waitForDictateStop(ctx, recording); err != nil {
+			return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
 		}
 	}
 	stopCtx, cancelStop := context.WithTimeout(context.Background(), 10*time.Second)
 	file, err := recording.Stop(stopCtx)
 	cancelStop()
 	if err != nil {
-		return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, false)
+		return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
 	}
 	emitter.emit(events.StateChanged, "transcribing", "", "", "", 0, 0, "")
 	result, err = executeTranscriptionWith(context.Background(), cfg, file.Path(), transcriber, processor, emitter, "dictate")
-	if err == nil && !(*jsonOutput && *sinkMode == "stdout") {
+	if err == nil && !(options.jsonOutput && options.sinkMode == "stdout") {
 		var delivery sink.Sink
 		delivery, err = sink.New(cfg, sink.Options{Stdout: stdout})
 		if err == nil {
-			err = delivery.Deliver(context.Background(), result.TranscriptFinal)
+			err = deliverDictate(delivery, result.TranscriptFinal)
 		}
 		if err == nil {
 			emitter.emit(events.Delivered, "delivering", result.Provider, "", "", 0, 0, "")
@@ -242,7 +327,52 @@ func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr
 			emitter.emit(events.Degraded, "delivering", result.Provider, errs.AudioFailed, "audio", 0, 0, "")
 		}
 	}
-	return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, false)
+	return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
+}
+
+func deliverDictate(delivery sink.Sink, text string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sink.ExternalDeliveryTimeout)
+	defer cancel()
+	return delivery.Deliver(ctx, text)
+}
+
+type stdinReadCanceler interface {
+	io.Reader
+	CancelRead() error
+}
+
+func (app App) waitForDictateStop(ctx context.Context, recording audio.Recording) error {
+	input, cancelRead := app.dictateInput()
+	stdinDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, input)
+		close(stdinDone)
+	}()
+
+	select {
+	case <-ctx.Done():
+		cancelRead()
+		return nil
+	case <-stdinDone:
+		return nil
+	case <-recording.Done():
+		cancelRead()
+		recordingErr := recording.Err()
+		if errs.Classify(recordingErr) != errs.AudioFailed {
+			recordingErr = errs.Wrap(errs.AudioFailed, "audio", "capture audio interrompue", recordingErr)
+		}
+		return errors.Join(recordingErr, recording.Abort())
+	}
+}
+
+func (app App) dictateInput() (io.Reader, func()) {
+	if app.Stdin == nil {
+		return os.Stdin, func() { _ = os.Stdin.Close() }
+	}
+	if input, ok := app.Stdin.(stdinReadCanceler); ok {
+		return input, func() { _ = input.CancelRead() }
+	}
+	return app.Stdin, func() {}
 }
 
 func executeTranscription(ctx context.Context, cfg config.Config, path string, emitter *commandEmitter) (commandResult, error) {
@@ -283,6 +413,7 @@ func executeTranscriptionWith(ctx context.Context, cfg config.Config, path strin
 		return result, err
 	}
 	result.Provider = multi.Provider
+	result.Model, result.Language = "", ""
 	if provider, ok := cfg.STT.Providers[result.Provider]; ok {
 		result.Model, result.Language = provider.Model, provider.Language
 	}
@@ -310,9 +441,9 @@ func executeTranscriptionWith(ctx context.Context, cfg config.Config, path strin
 	result.TranscriptFinal = processed.Text
 	for _, warning := range processed.Warnings {
 		result.Warnings = append(result.Warnings, commandWarning{
-			Class: errs.Internal, Provider: result.Provider, Component: warning.Stage, Message: warning.Message,
+			Class: warning.Class, Provider: result.Provider, Component: warning.Component, Message: warning.Message,
 		})
-		emitter.emit(events.Degraded, "processing", result.Provider, errs.Internal, warning.Stage, 0, 0, "")
+		emitter.emit(events.Degraded, "processing", result.Provider, warning.Class, warning.Component, 0, 0, "")
 	}
 	if strings.TrimSpace(result.TranscriptFinal) == "" {
 		return result, errs.New(errs.NoSpeech, "text-pipeline", "le pipeline n'a produit aucun texte")
@@ -352,6 +483,14 @@ func finishCommand(result commandResult, runErr error, jsonOutput bool, stdout, 
 		result.Success = true
 		emitter.emit(events.Terminal, "", result.Provider, "", "", 0, 0, "completed")
 	}
+	finishErr := runErr
+	if finishErr == nil {
+		if err := emitter.failure(); err != nil {
+			finishErr = errs.Wrap(errs.Internal, "io", "écriture du flux d'événements impossible", err)
+			result.Success = false
+			result.Error = safeError(finishErr)
+		}
+	}
 	if jsonOutput {
 		if err := json.NewEncoder(stdout).Encode(result); err != nil {
 			if !emitter.enabled {
@@ -359,7 +498,7 @@ func finishCommand(result commandResult, runErr error, jsonOutput bool, stdout, 
 			}
 			return 1
 		}
-	} else if runErr != nil {
+	} else if finishErr != nil {
 		if !emitter.enabled {
 			fmt.Fprintln(stderr, result.Error.Message)
 		}
@@ -376,7 +515,7 @@ func finishCommand(result commandResult, runErr error, jsonOutput bool, stdout, 
 			}
 		}
 	}
-	if runErr != nil {
+	if finishErr != nil {
 		return 1
 	}
 	return 0
@@ -417,6 +556,7 @@ type commandEmitter struct {
 	writer    io.Writer
 	sessionID string
 	mu        sync.Mutex
+	err       error
 }
 
 func newCommandEmitter(enabled bool, writer io.Writer, command string) *commandEmitter {
@@ -429,9 +569,30 @@ func (e *commandEmitter) emit(kind events.Type, state, provider string, class er
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	_ = events.EncodeJSONL(e.writer, events.Event{
+	if e.err != nil {
+		return
+	}
+	e.err = events.EncodeJSONL(shortWriteCheckingWriter{e.writer}, events.Event{
 		Version: 1, Type: kind, Timestamp: time.Now().UTC(), SessionID: e.sessionID,
 		State: state, Result: result, Provider: provider, ErrorClass: class,
 		Component: component, Partial: partial, Total: total,
 	})
+}
+
+func (e *commandEmitter) failure() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.err
+}
+
+type shortWriteCheckingWriter struct {
+	io.Writer
+}
+
+func (w shortWriteCheckingWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if n < len(p) && err == nil {
+		err = io.ErrShortWrite
+	}
+	return n, err
 }

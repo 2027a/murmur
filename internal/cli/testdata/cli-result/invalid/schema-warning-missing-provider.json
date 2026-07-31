@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "command": "cleanup",
+  "success": true,
+  "provider": "",
+  "model": "",
+  "language": "",
+  "transcript_raw": "texte",
+  "transcript_final": "texte",
+  "segment_count": 0,
+  "segments": [],
+  "warnings": [
+    {"class": "timeout", "component": "cleanup", "message": "cleanup dégradé"}
+  ],
+  "error": null
+}

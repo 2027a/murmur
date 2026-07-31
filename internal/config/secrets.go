@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,12 @@ const (
 	DefaultSecretCommandTimeout = 10 * time.Second
 	MaxSecretBytes              = 64 << 10
 )
+
+var credentialFstat = func(fd int) (syscall.Stat_t, error) {
+	var stat syscall.Stat_t
+	err := syscall.Fstat(fd, &stat)
+	return stat, err
+}
 
 func (r SecretResolver) Resolve(ctx context.Context, provider ProviderConfig) (string, error) {
 	return r.resolve(ctx, provider.credentials())
@@ -59,17 +66,19 @@ func (r SecretResolver) resolve(ctx context.Context, provider CredentialConfig) 
 		return strings.TrimSpace(value), nil
 	}
 	if provider.APIKeyFile != "" {
-		fd, err := syscall.Open(provider.APIKeyFile, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+		if !filepath.IsAbs(provider.APIKeyFile) {
+			return "", errs.New(errs.ConfigInvalid, "secret", "api_key_file doit être un chemin absolu")
+		}
+		file, err := openAbsoluteFileNoFollow(provider.APIKeyFile)
 		if err != nil {
-			if errors.Is(err, syscall.ELOOP) {
-				return "", errs.New(errs.ConfigInvalid, "secret", "le fichier de credential ne peut pas être un lien symbolique")
+			if errors.Is(err, errUnsafePathComponent) {
+				return "", errs.New(errs.ConfigInvalid, "secret", "api_key_file ne peut contenir aucun lien symbolique")
 			}
 			return "", errs.Wrap(errs.AuthFailed, "secret", "fichier de credential inaccessible", err)
 		}
-		file := os.NewFile(uintptr(fd), provider.APIKeyFile)
 		defer file.Close()
-		var stat syscall.Stat_t
-		if err := syscall.Fstat(fd, &stat); err != nil {
+		stat, err := credentialFstat(int(file.Fd()))
+		if err != nil {
 			return "", errs.Wrap(errs.AuthFailed, "secret", "inspection du fichier de credential impossible", err)
 		}
 		if stat.Mode&syscall.S_IFMT != syscall.S_IFREG || stat.Mode&0o077 != 0 || stat.Uid != uint32(os.Geteuid()) {
@@ -154,4 +163,23 @@ func APIKeyEnvironmentNames(cfg Config) []string {
 		add(provider.APIKeyEnv)
 	}
 	return names
+}
+
+// CredentialHelperEnvironment preserves the parent environment except for every
+// credential variable named by the complete provider snapshot. Unix environment
+// names are case-sensitive, and every duplicate assignment is removed.
+func CredentialHelperEnvironment(cfg Config, environment []string) []string {
+	blocked := make(map[string]struct{})
+	for _, name := range APIKeyEnvironmentNames(cfg) {
+		blocked[name] = struct{}{}
+	}
+	filtered := make([]string, 0, len(environment))
+	for _, assignment := range environment {
+		name, _, _ := strings.Cut(assignment, "=")
+		if _, remove := blocked[name]; remove {
+			continue
+		}
+		filtered = append(filtered, assignment)
+	}
+	return filtered
 }

@@ -11,6 +11,7 @@ import (
 	"git.2027a.net/mathieu/murmur/internal/audio/pwrecord"
 	"git.2027a.net/mathieu/murmur/internal/config"
 	"git.2027a.net/mathieu/murmur/internal/core"
+	"git.2027a.net/mathieu/murmur/internal/errs"
 	"git.2027a.net/mathieu/murmur/internal/events"
 	"git.2027a.net/mathieu/murmur/internal/sink"
 	"git.2027a.net/mathieu/murmur/internal/sysexec"
@@ -38,6 +39,15 @@ func buildPlugin(cfg config.Config) (textpipe.Plugin, error) {
 }
 
 func Build(options BuildOptions) (*Orchestrator, error) {
+	if err := config.Validate(options.Config); err != nil {
+		return nil, err
+	}
+	if err := config.ValidateClipboardOnly(options.Config, options.ClipboardOnly); err != nil {
+		return nil, err
+	}
+	if options.SessionID == "" || options.RuntimeDir == "" {
+		return nil, errs.New(errs.ConfigInvalid, "session", "identifiant ou répertoire de session manquant")
+	}
 	var machine *Machine
 	var startedAt time.Time
 	if options.Bootstrap != nil {
@@ -72,8 +82,10 @@ func Build(options BuildOptions) (*Orchestrator, error) {
 		case "notify":
 			userInterface = ui.NewDesktopNotifications(nil)
 		case "osd":
+			closeTimeout := time.Duration(max(options.Config.UI.OSD.SuccessTimeoutMS, options.Config.UI.OSD.ErrorTimeoutMS))*time.Millisecond + ui.OSDHelperExitGrace
 			userInterface = ui.NewOSD(executor, ui.OSDOptions{
-				Helper: options.Config.UI.OSD.Helper,
+				Helper:       options.Config.UI.OSD.Helper,
+				CloseTimeout: closeTimeout,
 				Args: []string{
 					"--position", options.Config.UI.OSD.Position,
 					"--success-timeout-ms", strconv.Itoa(options.Config.UI.OSD.SuccessTimeoutMS),
@@ -106,13 +118,12 @@ func Build(options BuildOptions) (*Orchestrator, error) {
 
 func processExecutors(cfg config.Config, executor, secretExecutor sysexec.Executor) (sysexec.Executor, sysexec.Executor) {
 	environment := os.Environ()
+	filteredEnvironment := config.CredentialHelperEnvironment(cfg, environment)
 	if executor == nil {
-		executor = sysexec.OSExecutor{
-			Env: sysexec.FilterEnvironment(environment, config.APIKeyEnvironmentNames(cfg)),
-		}
+		executor = sysexec.OSExecutor{Env: filteredEnvironment}
 	}
 	if secretExecutor == nil {
-		secretExecutor = sysexec.OSExecutor{Env: environment}
+		secretExecutor = sysexec.OSExecutor{Env: filteredEnvironment}
 	}
 	return executor, secretExecutor
 }

@@ -33,9 +33,9 @@ Commandes:
   transcribe [--json] [--events] <fichier.wav>
                             transcrire un WAV sans capture desktop
   cleanup [--json] [--events]
-                            nettoyer stdin vers stdout sans capture
-  dictate --sink stdout|file [--json] [--events]
-                            capturer au premier plan jusqu'au signal ou EOF
+                             nettoyer stdin vers stdout sans capture
+  dictate [--sink stdout|file] [--json] [--events]
+                             capturer au premier plan; stdout par défaut
 `
 
 type App struct {
@@ -109,7 +109,9 @@ func (app App) Run(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return usageError(stderr, "commande inconnue: "+args[0])
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		if args[0] != "__session" {
+			fmt.Fprintln(stderr, err)
+		}
 		return 1
 	}
 	return 0
@@ -183,10 +185,11 @@ func (app App) toggle(ctx context.Context, stdout io.Writer, clipboardOnly bool)
 }
 
 type statusOutput struct {
-	Version    int                 `json:"v"`
-	Active     bool                `json:"active"`
-	State      string              `json:"state"`
-	LastResult *session.LastResult `json:"last_result,omitempty"`
+	Version         int                 `json:"v"`
+	Active          bool                `json:"active"`
+	State           string              `json:"state"`
+	LastResult      *session.LastResult `json:"last_result,omitempty"`
+	LastResultStale bool                `json:"last_result_stale,omitempty"`
 }
 
 func (app App) status(ctx context.Context, stdout io.Writer, jsonOutput bool) error {
@@ -202,6 +205,8 @@ func (app App) status(ctx context.Context, stdout io.Writer, jsonOutput bool) er
 		last, readErr := session.ReadLastResult(runtimeDir)
 		if readErr == nil {
 			status.LastResult = &last
+		} else if errors.Is(readErr, session.ErrLastResultStale) {
+			status.LastResultStale = true
 		} else if !errors.Is(readErr, os.ErrNotExist) {
 			return readErr
 		}
@@ -213,12 +218,27 @@ func (app App) status(ctx context.Context, stdout io.Writer, jsonOutput bool) er
 	}
 	if status.Active {
 		_, err = fmt.Fprintln(stdout, status.State)
+	} else if status.LastResultStale {
+		_, err = fmt.Fprintln(stdout, "idle (dernier résultat périmé: persistance incomplète)")
 	} else if status.LastResult != nil {
-		_, err = fmt.Fprintf(stdout, "idle (dernier résultat: %s)\n", status.LastResult.Result)
+		if hasJournalWarning(status.LastResult.Warnings) {
+			_, err = fmt.Fprintf(stdout, "idle (dernier résultat: %s, journal dégradé)\n", status.LastResult.Result)
+		} else {
+			_, err = fmt.Fprintf(stdout, "idle (dernier résultat: %s)\n", status.LastResult.Result)
+		}
 	} else {
 		_, err = fmt.Fprintln(stdout, "idle")
 	}
 	return err
+}
+
+func hasJournalWarning(warnings []session.ResultWarning) bool {
+	for _, warning := range warnings {
+		if warning.Component == "session-journal" {
+			return true
+		}
+	}
+	return false
 }
 
 func (app App) doctor(ctx context.Context, stdout io.Writer, jsonOutput bool) (bool, error) {

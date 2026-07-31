@@ -58,6 +58,9 @@ func NewOpenAICompatible(config Config) (*Client, error) {
 	if config.Timeout <= 0 {
 		return nil, errs.New(errs.ConfigInvalid, "cleanup", "timeout doit être strictement positif")
 	}
+	if strings.TrimSpace(config.Model) == "" {
+		return nil, errs.New(errs.ConfigInvalid, "cleanup", "modèle manquant")
+	}
 	prompt := strings.TrimSpace(config.Prompt)
 	if prompt == "" {
 		prompt = DefaultPrompt
@@ -126,6 +129,11 @@ func (c *Client) request(ctx context.Context, input string) (string, error) {
 	if err != nil {
 		return "", classifyTransportError(err)
 	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		classified := classifyStatus(response.StatusCode)
+		drainAndClose(response.Body)
+		return "", classified
+	}
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
@@ -133,9 +141,6 @@ func (c *Client) request(ctx context.Context, input string) (string, error) {
 	}
 	if len(data) > maxResponseBytes {
 		return "", errs.New(errs.ServerError, "cleanup", "réponse trop volumineuse")
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", classifyStatus(response.StatusCode)
 	}
 	var decoded struct {
 		Choices []struct {
@@ -149,6 +154,11 @@ func (c *Client) request(ctx context.Context, input string) (string, error) {
 		return "", errs.New(errs.EmptyResponse, "cleanup", "réponse sans choix")
 	}
 	return strings.TrimSpace(decoded.Choices[0].Message.Content), nil
+}
+
+func drainAndClose(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxResponseBytes))
+	_ = body.Close()
 }
 
 type message struct {

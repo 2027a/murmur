@@ -2,9 +2,12 @@ package inject
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
+	"git.2027a.net/mathieu/murmur/internal/delivery"
 	"git.2027a.net/mathieu/murmur/internal/errs"
 	"git.2027a.net/mathieu/murmur/internal/sysexec"
 )
@@ -12,9 +15,9 @@ import (
 type NewlineMode string
 
 const (
-	Keep   NewlineMode = "keep"
-	Space  NewlineMode = "space"
-	Marker NewlineMode = "marker"
+	Space         NewlineMode = "space"
+	Marker        NewlineMode = "marker"
+	DangerousKeep NewlineMode = "dangerous-keep"
 )
 
 const newlineMarker = " [NL] "
@@ -29,7 +32,7 @@ func New(executor sysexec.Executor, shortcuts []string, newlines NewlineMode) (*
 	if executor == nil {
 		return nil, errs.New(errs.ConfigInvalid, "inject", "aucun exécuteur disponible")
 	}
-	if newlines != Keep && newlines != Space && newlines != Marker {
+	if newlines != Space && newlines != Marker && newlines != DangerousKeep {
 		return nil, errs.New(errs.ConfigInvalid, "inject", fmt.Sprintf("mode de retours à la ligne invalide: %q", newlines))
 	}
 	parsed := make([][]string, len(shortcuts))
@@ -45,9 +48,15 @@ func New(executor sysexec.Executor, shortcuts []string, newlines NewlineMode) (*
 
 // Type sends text to wtype's stdin after applying the newline policy.
 func (i *Injector) Type(ctx context.Context, text string) error {
-	text = formatNewlines(text, i.newlines)
+	commandCtx, cancel := context.WithTimeout(ctx, delivery.CommandTimeout)
+	defer cancel()
+	return i.typeText(commandCtx, text)
+}
+
+func (i *Injector) typeText(ctx context.Context, text string) error {
+	text = SanitizeText(text, i.newlines)
 	if _, err := i.executor.Run(ctx, "wtype", []string{"-"}, []byte(text)); err != nil {
-		return errs.Wrap(errs.SinkFailed, "inject", "frappe simulée impossible", err)
+		return commandError(ctx, "frappe simulée impossible", err)
 	}
 	return nil
 }
@@ -55,12 +64,24 @@ func (i *Injector) Type(ctx context.Context, text string) error {
 // Paste tries each configured shortcut and falls back to simulated typing only
 // when every shortcut command failed technically.
 func (i *Injector) Paste(ctx context.Context, text string) error {
+	commandCtx, cancel := context.WithTimeout(ctx, delivery.CommandTimeout)
+	defer cancel()
 	for _, args := range i.shortcuts {
-		if _, err := i.executor.Run(ctx, "wtype", args, nil); err == nil {
+		if _, err := i.executor.Run(commandCtx, "wtype", args, nil); err == nil {
 			return nil
 		}
+		if commandCtx.Err() != nil {
+			return commandError(commandCtx, "collage simulé impossible", commandCtx.Err())
+		}
 	}
-	return i.Type(ctx, text)
+	return i.typeText(commandCtx, text)
+}
+
+func commandError(ctx context.Context, message string, cause error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return errs.New(errs.SinkFailed, "inject", message+": délai de livraison dépassé")
+	}
+	return errs.Wrap(errs.SinkFailed, "inject", message, cause)
 }
 
 func shortcutArgs(shortcut string) ([]string, bool) {
@@ -76,14 +97,31 @@ func shortcutArgs(shortcut string) ([]string, bool) {
 	}
 }
 
-func formatNewlines(text string, mode NewlineMode) string {
-	if mode == Keep {
-		return text
-	}
+// SanitizeText prepares untrusted text for active paste or typing. Tabs become
+// spaces, invalid UTF-8 becomes U+FFFD, and Unicode control characters are
+// removed except for explicitly opted-in line feeds.
+func SanitizeText(text string, mode NewlineMode) string {
+	text = strings.ToValidUTF8(text, "\uFFFD")
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
-	if mode == Space {
-		return strings.ReplaceAll(text, "\n", " ")
+	switch mode {
+	case Marker:
+		text = strings.ReplaceAll(text, "\n", newlineMarker)
+	case DangerousKeep:
+	default:
+		text = strings.ReplaceAll(text, "\n", " ")
 	}
-	return strings.ReplaceAll(text, "\n", newlineMarker)
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\t':
+			return ' '
+		case '\n':
+			return r
+		default:
+			if unicode.IsControl(r) {
+				return -1
+			}
+			return r
+		}
+	}, text)
 }

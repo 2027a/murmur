@@ -11,9 +11,9 @@ import (
 	"git.2027a.net/mathieu/murmur/internal/errs"
 )
 
-type liveStopRequest struct {
-	ctx    context.Context
-	result chan error
+type liveCaptureResult struct {
+	file audio.WavFile
+	err  error
 }
 
 type liveRecording struct {
@@ -21,17 +21,19 @@ type liveRecording struct {
 	segmenter *audio.GrowingSegmenter
 	tempDir   string
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	ready  chan error
-	parts  chan audio.LiveSegment
-	errors chan error
-	stop   chan liveStopRequest
-	done   chan struct{}
+	ctx     context.Context
+	cancel  context.CancelFunc
+	ready   chan error
+	parts   chan audio.LiveSegment
+	errors  chan error
+	stop    chan struct{}
+	stopped chan liveCaptureResult
+	done    chan struct{}
 
 	mu       sync.Mutex
 	final    audio.WavFile
 	runErr   error
+	stopOnce sync.Once
 	cleanup  sync.Once
 	kept     string
 	cleanErr error
@@ -76,7 +78,7 @@ func (r *Recorder) StartLive(ctx context.Context, opts audio.RecordOptions, live
 		recording: child, segmenter: segmenter, tempDir: tempDir,
 		ctx: liveCtx, cancel: cancel, ready: make(chan error, 1),
 		parts: make(chan audio.LiveSegment, 2), errors: make(chan error, 1),
-		stop: make(chan liveStopRequest), done: make(chan struct{}),
+		stop: make(chan struct{}), stopped: make(chan liveCaptureResult), done: make(chan struct{}),
 	}
 	go recording.run(normalized.ReadinessInterval)
 	return recording, nil
@@ -102,9 +104,16 @@ func (r *liveRecording) run(interval time.Duration) {
 			return
 		}
 	case <-r.recording.Done():
-		err := recordingEnded(r.recording)
+		err := r.endedOrStopped()
 		r.publishReady(err)
-		_ = r.recording.Abort()
+		if !r.stopRequested() {
+			_ = r.recording.Abort()
+		}
+		r.finish(err)
+		return
+	case result := <-r.stopped:
+		err := r.finalize(result)
+		r.publishReady(err)
 		r.finish(err)
 		return
 	case <-r.ctx.Done():
@@ -119,18 +128,18 @@ func (r *liveRecording) run(interval time.Duration) {
 	for {
 		select {
 		case <-r.recording.Done():
-			err := recordingEnded(r.recording)
-			_ = r.recording.Abort()
+			err := r.endedOrStopped()
+			if !r.stopRequested() {
+				_ = r.recording.Abort()
+			}
 			r.finish(err)
+			return
+		case result := <-r.stopped:
+			r.finish(r.finalize(result))
 			return
 		case <-r.ctx.Done():
 			_ = r.recording.Abort()
 			r.finish(r.ctx.Err())
-			return
-		case request := <-r.stop:
-			err := r.finalize(request.ctx)
-			r.finish(err)
-			request.result <- err
 			return
 		case <-ticker.C:
 			segments, err := r.segmenter.Poll()
@@ -148,15 +157,14 @@ func (r *liveRecording) run(interval time.Duration) {
 	}
 }
 
-func (r *liveRecording) finalize(ctx context.Context) error {
-	file, err := r.recording.Stop(ctx)
-	if err != nil {
-		return err
+func (r *liveRecording) finalize(result liveCaptureResult) error {
+	if result.err != nil {
+		return result.err
 	}
 	r.mu.Lock()
-	r.final = file
+	r.final = result.file
 	r.mu.Unlock()
-	segments, err := r.segmenter.Finalize(file.File)
+	segments, err := r.segmenter.Finalize(result.file.File)
 	if err != nil {
 		return err
 	}
@@ -191,18 +199,34 @@ func (r *liveRecording) finish(err error) {
 }
 
 func (r *liveRecording) Stop(ctx context.Context) error {
-	request := liveStopRequest{ctx: ctx, result: make(chan error, 1)}
 	select {
-	case r.stop <- request:
+	case <-r.done:
+		return r.result()
+	default:
+	}
+	owner := false
+	r.stopOnce.Do(func() {
+		owner = true
+		close(r.stop)
+		go func() {
+			file, err := r.recording.Stop(ctx)
+			result := liveCaptureResult{file: file, err: err}
+			select {
+			case r.stopped <- result:
+			case <-r.done:
+				if file.Path() != "" {
+					_ = file.File.Close()
+				}
+			}
+		}()
+	})
+	select {
 	case <-r.done:
 		return r.result()
 	case <-ctx.Done():
-		return ctx.Err()
-	}
-	select {
-	case err := <-request.result:
-		return err
-	case <-ctx.Done():
+		if !owner {
+			return ctx.Err()
+		}
 		r.cancel()
 		<-r.done
 		return ctx.Err()
@@ -212,7 +236,12 @@ func (r *liveRecording) Stop(ctx context.Context) error {
 func (r *liveRecording) Abort() error {
 	r.cancel()
 	<-r.done
-	r.cleanup.Do(func() { r.cleanErr = os.RemoveAll(r.tempDir) })
+	r.cleanup.Do(func() {
+		r.mu.Lock()
+		final := r.final
+		r.mu.Unlock()
+		r.cleanErr = errors.Join(r.segmenter.Close(), final.File.Close(), os.RemoveAll(r.tempDir))
+	})
 	if err := r.result(); err != nil && !errors.Is(err, context.Canceled) {
 		return errors.Join(err, r.cleanErr)
 	}
@@ -224,13 +253,14 @@ func (r *liveRecording) Release() (string, error) {
 		r.mu.Lock()
 		final := r.final
 		r.mu.Unlock()
+		segmentErr := r.segmenter.Close()
 		if final.Path() == "" {
-			r.cleanErr = os.RemoveAll(r.tempDir)
+			r.cleanErr = errors.Join(segmentErr, os.RemoveAll(r.tempDir))
 			return
 		}
 		finalCleanupResult, err := final.Release()
 		r.kept = finalCleanupResult
-		r.cleanErr = errors.Join(err, os.RemoveAll(r.tempDir))
+		r.cleanErr = errors.Join(segmentErr, err, os.RemoveAll(r.tempDir))
 	})
 	return r.kept, r.cleanErr
 }
@@ -239,6 +269,27 @@ func (r *liveRecording) result() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.runErr
+}
+
+func (r *liveRecording) stopRequested() bool {
+	select {
+	case <-r.stop:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *liveRecording) endedOrStopped() error {
+	if !r.stopRequested() {
+		return recordingEnded(r.recording)
+	}
+	select {
+	case result := <-r.stopped:
+		return r.finalize(result)
+	case <-r.ctx.Done():
+		return r.ctx.Err()
+	}
 }
 
 func recordingEnded(recording audio.Recording) error {

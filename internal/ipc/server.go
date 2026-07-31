@@ -1,9 +1,12 @@
 package ipc
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"sync"
@@ -14,7 +17,10 @@ import (
 	"git.2027a.net/mathieu/murmur/internal/events"
 )
 
-const defaultTimeout = 2 * time.Second
+const (
+	defaultTimeout      = 2 * time.Second
+	maxRequestFrameSize = 4 * 1024
+)
 
 type Server struct {
 	listener     net.Listener
@@ -22,7 +28,13 @@ type Server struct {
 	bus          *events.Bus
 	readTimeout  atomic.Int64
 	writeTimeout atomic.Int64
-	connections  sync.WaitGroup
+	lifecycle    context.Context
+	cancel       context.CancelFunc
+	closeOnce    sync.Once
+	closeErr     error
+	connections  map[net.Conn]struct{}
+	connectionsM sync.Mutex
+	connectionWG sync.WaitGroup
 }
 
 func Listen(path string, handler Handler, bus *events.Bus) (*Server, error) {
@@ -35,7 +47,11 @@ func Listen(path string, handler Handler, bus *events.Bus) (*Server, error) {
 		os.Remove(path)
 		return nil, errs.Wrap(errs.Unavailable, "ipc", "permissions du socket de session impossibles", err)
 	}
-	server := &Server{listener: listener, handler: handler, bus: bus}
+	lifecycle, cancel := context.WithCancel(context.Background())
+	server := &Server{
+		listener: listener, handler: handler, bus: bus,
+		lifecycle: lifecycle, cancel: cancel, connections: make(map[net.Conn]struct{}),
+	}
 	server.SetTimeouts(defaultTimeout, defaultTimeout)
 	return server, nil
 }
@@ -46,44 +62,85 @@ func (s *Server) SetTimeouts(read, write time.Duration) {
 }
 
 func (s *Server) Serve(ctx context.Context) error {
-	stopWatcher := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			s.listener.Close()
-		case <-stopWatcher:
-		}
-	}()
-	defer close(stopWatcher)
+	serveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopLifecycleCancel := context.AfterFunc(s.lifecycle, cancel)
+	defer stopLifecycleCancel()
+	stopContextClose := context.AfterFunc(ctx, func() { _ = s.Close() })
+	defer stopContextClose()
 
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				s.connections.Wait()
+			if serveCtx.Err() != nil || s.lifecycle.Err() != nil || errors.Is(err, net.ErrClosed) {
+				s.connectionWG.Wait()
 				return nil
 			}
 			return errs.Wrap(errs.Unavailable, "ipc", "acceptation IPC impossible", err)
 		}
-		s.connections.Add(1)
+		if serveCtx.Err() != nil || !s.trackConnection(conn) {
+			_ = conn.Close()
+			_ = s.Close()
+			s.connectionWG.Wait()
+			return nil
+		}
 		go func() {
-			defer s.connections.Done()
-			defer conn.Close()
-			s.handleConnection(ctx, conn)
+			defer func() {
+				_ = conn.Close()
+				s.releaseConnection(conn)
+			}()
+			s.handleConnection(serveCtx, conn)
 		}()
 	}
 }
 
 func (s *Server) Close() error {
-	return s.listener.Close()
+	s.closeOnce.Do(func() {
+		s.cancel()
+		s.closeErr = s.listener.Close()
+		if errors.Is(s.closeErr, net.ErrClosed) {
+			s.closeErr = nil
+		}
+		s.closeConnections()
+	})
+	return s.closeErr
+}
+
+func (s *Server) trackConnection(conn net.Conn) bool {
+	s.connectionsM.Lock()
+	defer s.connectionsM.Unlock()
+	if s.lifecycle.Err() != nil {
+		return false
+	}
+	s.connections[conn] = struct{}{}
+	s.connectionWG.Add(1)
+	return true
+}
+
+func (s *Server) releaseConnection(conn net.Conn) {
+	s.connectionsM.Lock()
+	delete(s.connections, conn)
+	s.connectionsM.Unlock()
+	s.connectionWG.Done()
+}
+
+func (s *Server) closeConnections() {
+	s.connectionsM.Lock()
+	connections := make([]net.Conn, 0, len(s.connections))
+	for conn := range s.connections {
+		connections = append(connections, conn)
+	}
+	s.connectionsM.Unlock()
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
 }
 
 func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	conn.SetReadDeadline(time.Now().Add(time.Duration(s.readTimeout.Load())))
-	decoder := json.NewDecoder(conn)
-	decoder.DisallowUnknownFields()
-	var request Request
-	if err := decoder.Decode(&request); err != nil {
+	reader := bufio.NewReaderSize(conn, maxRequestFrameSize)
+	request, err := readRequest(reader)
+	if err != nil {
 		s.writeResponse(conn, Failure(errs.Wrap(errs.ConfigInvalid, "ipc", "requête JSON invalide", err)))
 		return
 	}
@@ -96,7 +153,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			s.writeResponse(conn, Failure(errs.Wrap(errs.Unavailable, "ipc", "suppression du délai de lecture impossible", err)))
 			return
 		}
-		s.serveSubscription(ctx, conn)
+		s.serveSubscription(ctx, conn, reader)
 		return
 	}
 	if s.handler == nil {
@@ -108,7 +165,28 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	s.writeResponse(conn, response)
 }
 
-func (s *Server) serveSubscription(ctx context.Context, conn net.Conn) {
+func readRequest(reader *bufio.Reader) (Request, error) {
+	frame, err := reader.ReadSlice('\n')
+	if err != nil {
+		return Request{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(frame))
+	decoder.DisallowUnknownFields()
+	var request Request
+	if err := decoder.Decode(&request); err != nil {
+		return Request{}, err
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("plusieurs valeurs JSON dans la requête")
+		}
+		return Request{}, err
+	}
+	return request, nil
+}
+
+func (s *Server) serveSubscription(ctx context.Context, conn net.Conn, reader *bufio.Reader) {
 	if s.bus == nil {
 		s.writeResponse(conn, Failure(errs.New(errs.Unavailable, "ipc", "flux d'événements indisponible")))
 		return
@@ -118,11 +196,15 @@ func (s *Server) serveSubscription(ctx context.Context, conn net.Conn) {
 	if err := s.writeResponse(conn, Success("subscribed")); err != nil {
 		return
 	}
-	clientGone := make(chan struct{}, 1)
+	clientGone := make(chan struct{})
 	go func() {
+		defer close(clientGone)
 		var unexpected [1]byte
-		_, _ = conn.Read(unexpected[:])
-		clientGone <- struct{}{}
+		_, _ = reader.Read(unexpected[:])
+	}()
+	defer func() {
+		_ = conn.Close()
+		<-clientGone
 	}()
 	for {
 		select {
