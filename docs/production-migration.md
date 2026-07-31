@@ -10,13 +10,14 @@ Chemin de production validé:
 
 - source PipeWire par défaut: RØDE NT-USB+ Mono;
 - STT LAN: `http://192.168.100.33:18080/v1`, modèle `whisper-1`, français;
-- cleanup, fallback cloud, live chunking et plugin Markdown désactivés;
+- cleanup OpenRouter actif avec `openai/gpt-4o-mini`;
+- fallback STT cloud, live chunking et plugin Markdown désactivés;
 - chunking post-capture à 60 secondes;
 - sink `paste`, clipboard `raw-and-clean`, guillemets ASCII;
 - notifications D-Bus;
 - `Super+M`: toggle normal;
 - `Super+Shift+M`: toggle clipboard-only;
-- `Super+Ctrl+Échap`: annulation.
+- `Super+Échap`: annulation immédiate sans livraison.
 
 Validations desktop réalisées:
 
@@ -27,9 +28,12 @@ Validations desktop réalisées:
 - frappe `wtype` réelle dans un éditeur;
 - collage réel et présence dans `cliphist`;
 - notifications écoute, traitement et réussite;
+- cleanup OpenRouter validé avec sentinelle protégée et sans fallback dégradé;
 - refus d'un second démarrage concurrent;
 - annulation terminale sans STT, sink ni processus orphelin;
 - raccourcis canary puis raccourci principal testés physiquement;
+- benchmark GPT-4o mini contre GPT-5.6 Luna consigné dans
+  [`cleanup-benchmark.md`](cleanup-benchmark.md);
 - suite complète `go test -race ./...`, vet, build et installcheck après les
   corrections découvertes pendant les essais.
 
@@ -38,17 +42,17 @@ d'un répertoire de configuration symlinké vers des dotfiles sûrs, et acceptat
 du code de sortie 1 émis par `pw-record` après SIGINT lorsque le WAV final est
 valide.
 
-## Rollback
+## Ancien Système
 
-L'ancien système reste installé sans être le chemin principal:
+WaySTT ne possède plus aucun raccourci ni sous-mode actif dans la configuration
+Hyprland. Ses fichiers restent installés uniquement comme archive temporaire;
+la sauvegarde de configuration est
+`~/.config/murmur.migration-backup-20260730`.
 
-- `Super+Alt+M`: ancien WaySTT normal;
-- `Super+Alt+Shift+M`: ancien WaySTT clipboard-only;
-- sauvegarde de configuration:
-  `~/.config/murmur.migration-backup-20260730`.
-
-Le rollback ne doit être supprimé qu'après une période d'usage couvrant les
-dictées longues, les applications habituelles et une reconnexion Wayland.
+Les notifications Murmur utilisent les notifications D-Bus normales et des
+catégories Dunst dédiées. Elles se remplacent sans prendre le focus: jaune au
+démarrage, vert pendant l'écoute, cyan pendant le traitement, vert au succès,
+orange à l'annulation et rouge à l'échec.
 
 ## Restant À Valider
 
@@ -56,5 +60,5 @@ dictées longues, les applications habituelles et une reconnexion Wayland.
 - vingt cycles quotidiens sans fuite de processus ou de fichiers;
 - reprise après indisponibilité temporaire du provider LAN;
 - reconnexion de session Wayland;
-- OSD, son, live chunking, cleanup, fallback cloud et Markdown avant toute
+- OSD, son, live chunking, fallback cloud et Markdown avant toute
   activation de ces options.

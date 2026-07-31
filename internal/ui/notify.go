@@ -16,6 +16,7 @@ const notificationBuffer = 16
 type Notification struct {
 	Summary   string
 	Body      string
+	Category  string
 	Urgency   byte
 	TimeoutMS int32
 }
@@ -116,47 +117,77 @@ func (u *Notify) run() {
 }
 
 func notificationForEvent(event events.Event) (Notification, bool) {
-	n := Notification{Summary: "Murmur", Urgency: 1, TimeoutMS: 1800}
+	n := Notification{Urgency: 1, TimeoutMS: 2200}
 	switch event.Type {
 	case events.SessionStarted:
-		n.Body = "Demarrage de la capture"
+		n.Summary = "MURMUR  |  DÉMARRAGE"
+		n.Body = "Initialisation du microphone"
+		n.Category = "murmur.starting"
 	case events.CaptureReady:
-		n.Body = "Ecoute en cours"
+		n.Summary = "MURMUR  |  ÉCOUTE"
+		n.Body = "Microphone actif. Dictez maintenant."
+		n.Category = "murmur.recording"
 		n.TimeoutMS = 0
 	case events.StateChanged:
 		switch event.State {
 		case "stopping":
-			n.Body = "Arret de la capture"
+			n.Summary = "MURMUR  |  ARRÊT"
+			n.Body = "Finalisation de la capture"
+			n.Category = "murmur.stopping"
 		case "transcribing":
-			n.Body = "Transcription en cours"
+			n.Summary = "MURMUR  |  TRANSCRIPTION"
+			n.Body = "Reconnaissance vocale en cours"
+			n.Category = "murmur.processing"
 		case "processing":
-			n.Body = "Traitement en cours"
+			n.Summary = "MURMUR  |  TRAITEMENT"
+			n.Body = "Préparation du texte final"
+			n.Category = "murmur.processing"
 		case "delivering":
-			n.Body = "Livraison en cours"
+			n.Summary = "MURMUR  |  LIVRAISON"
+			n.Body = "Envoi vers l’application active"
+			n.Category = "murmur.processing"
 		default:
 			return Notification{}, false
 		}
 	case events.PartialStarted:
+		n.Summary = "MURMUR  |  TRANSCRIPTION"
 		n.Body = progressLabel("Transcription", event.Partial, event.Total)
+		n.Category = "murmur.processing"
 	case events.PartialDone:
-		n.Body = progressLabel("Segment termine", event.Partial, event.Total)
+		n.Summary = "MURMUR  |  TRANSCRIPTION"
+		n.Body = progressLabel("Segment terminé", event.Partial, event.Total)
+		n.Category = "murmur.processing"
 	case events.PartialFailed, events.Degraded:
-		n.Body = "Fonctionnement degrade"
+		n.Summary = "MURMUR  |  ATTENTION"
+		n.Body = "Fonctionnement dégradé"
+		n.Category = "murmur.warning"
 		n.Urgency = 2
+		n.TimeoutMS = 5000
 	case events.Delivered:
-		n.Body = "Texte livre"
+		return Notification{}, false
 	case events.Terminal:
-		n.TimeoutMS = 3000
 		switch event.Result {
 		case "completed":
-			n.Body = "Dictee terminee"
+			n.Summary = "MURMUR  |  TERMINÉ"
+			n.Body = "Texte livré avec succès"
+			n.Category = "murmur.success"
+			n.TimeoutMS = 3500
 		case "cancelled":
-			n.Body = "Dictee annulee"
+			n.Summary = "MURMUR  |  ANNULÉ"
+			n.Body = "Aucun texte n’a été livré"
+			n.Category = "murmur.cancelled"
+			n.TimeoutMS = 3500
 		case "no_speech":
-			n.Body = "Aucune parole detectee"
+			n.Summary = "MURMUR  |  AUCUNE PAROLE"
+			n.Body = "Aucun texte n’a été livré"
+			n.Category = "murmur.warning"
+			n.TimeoutMS = 4500
 		default:
-			n.Body = "Echec de la dictee"
+			n.Summary = "MURMUR  |  ÉCHEC"
+			n.Body = "La dictée n’a pas pu être livrée"
+			n.Category = "murmur.error"
 			n.Urgency = 2
+			n.TimeoutMS = 6000
 		}
 	default:
 		return Notification{}, false
@@ -206,7 +237,10 @@ func (c *DBusNotificationClient) Notify(ctx context.Context, replacesID uint32, 
 	var id uint32
 	call := c.obj.CallWithContext(ctx, "org.freedesktop.Notifications.Notify", 0,
 		"Murmur", replacesID, "audio-input-microphone-symbolic", n.Summary, n.Body,
-		[]string{}, map[string]dbus.Variant{"urgency": dbus.MakeVariant(n.Urgency)}, n.TimeoutMS)
+		[]string{}, map[string]dbus.Variant{
+			"urgency":  dbus.MakeVariant(n.Urgency),
+			"category": dbus.MakeVariant(n.Category),
+		}, n.TimeoutMS)
 	if call.Err != nil {
 		return 0, call.Err
 	}

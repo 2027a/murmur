@@ -99,6 +99,29 @@ func TestTerminalCancellationAndNoSpeechAreNotFailureNotifications(t *testing.T)
 	}
 }
 
+func TestNotificationVisualCategories(t *testing.T) {
+	tests := []struct {
+		name     string
+		event    events.Event
+		category string
+		summary  string
+	}{
+		{name: "starting", event: event(events.SessionStarted, "starting"), category: "murmur.starting", summary: "MURMUR  |  DÉMARRAGE"},
+		{name: "recording", event: event(events.CaptureReady, "recording"), category: "murmur.recording", summary: "MURMUR  |  ÉCOUTE"},
+		{name: "processing", event: event(events.StateChanged, "transcribing"), category: "murmur.processing", summary: "MURMUR  |  TRANSCRIPTION"},
+		{name: "success", event: events.Event{Type: events.Terminal, Result: "completed"}, category: "murmur.success", summary: "MURMUR  |  TERMINÉ"},
+		{name: "error", event: events.Event{Type: events.Terminal, Result: "failed"}, category: "murmur.error", summary: "MURMUR  |  ÉCHEC"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			notification, ok := notificationForEvent(test.event)
+			if !ok || notification.Category != test.category || notification.Summary != test.summary {
+				t.Fatalf("notification = %#v", notification)
+			}
+		})
+	}
+}
+
 func TestOSDFailureIsBestEffort(t *testing.T) {
 	started := make(chan struct{}, 1)
 	executor := &sysexec.FakeExecutor{StartFunc: func(context.Context, string, []string) (sysexec.Process, error) {

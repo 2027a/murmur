@@ -10,6 +10,7 @@ DOC_FILES := \
 	audio.md \
 	cli-result.schema.json \
 	cli.md \
+	cleanup-benchmark.md \
 	configuration.md \
 	desktop-validation.md \
 	doctor.md \
