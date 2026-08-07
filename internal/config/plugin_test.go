@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -41,7 +42,11 @@ func TestPluginConfigurationDefaultsAndValidation(t *testing.T) {
 }
 
 func TestPluginConfigurationResolvesFromEnvironment(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", base)
 	cfg, err := ResolveWithOptions(ResolveOptions{LookupEnv: func(name string) (string, bool) {
 		values := map[string]string{
 			"MURMUR_PLUGIN_ENABLED":   "true",

@@ -65,6 +65,17 @@ func Open(path string) (File, error) {
 	return validateFinalSnapshot(handle, path, riffEnd)
 }
 
+// OpenGrowing opens a mutable WAV path once without following a final symlink.
+// Callers can pass the returned descriptor to SnapshotOpen while another
+// process appends PCM to the same inode.
+func OpenGrowing(path string) (*os.File, error) {
+	handle, err := openRegular(path, syscall.O_RDONLY)
+	if err != nil {
+		return nil, audioError("impossible d'ouvrir le WAV en croissance", err)
+	}
+	return handle, nil
+}
+
 func validateFinalSnapshot(handle *os.File, path string, riffEnd int64) (File, error) {
 	ok := false
 	defer func() {
@@ -121,6 +132,9 @@ func validateFinalSnapshot(handle *os.File, path string, riffEnd int64) (File, e
 			}
 			formatSeen = true
 		case "data":
+			if !formatSeen {
+				return File{}, audioError("chunk data avant le format WAV", nil)
+			}
 			if dataSeen {
 				return File{}, audioError("plusieurs chunks data dans le WAV", nil)
 			}
@@ -241,7 +255,10 @@ func HasAudioData(path string) (bool, error) {
 			}
 			formatSeen = true
 		case "data":
-			return formatSeen && info.Size() >= payload+BlockAlign, nil
+			if !formatSeen {
+				return false, audioError("chunk data avant le format WAV", nil)
+			}
+			return info.Size() >= payload+BlockAlign, nil
 		}
 		end := payload + size
 		if end < payload || end > info.Size() {
@@ -261,6 +278,31 @@ func Snapshot(path string) (File, bool, error) {
 			return File{}, false, nil
 		}
 		return File{}, false, audioError("impossible d'ouvrir le snapshot WAV", err)
+	}
+	info, err := handle.Stat()
+	if err != nil {
+		_ = handle.Close()
+		return File{}, false, audioError("impossible d'inspecter le snapshot WAV", err)
+	}
+	return inspectGrowingSnapshot(handle, path, info.Size())
+}
+
+// SnapshotOpen snapshots the physical samples currently visible through an
+// already-open growing WAV descriptor. The descriptor is duplicated so the
+// returned File owns only its immutable view.
+func SnapshotOpen(source *os.File, path string) (File, bool, error) {
+	if source == nil {
+		return File{}, false, audioError("descripteur WAV en croissance invalide", os.ErrInvalid)
+	}
+	fd, err := syscall.Dup(int(source.Fd()))
+	if err != nil {
+		return File{}, false, audioError("impossible de dupliquer le WAV en croissance", err)
+	}
+	syscall.CloseOnExec(fd)
+	handle := os.NewFile(uintptr(fd), path)
+	if handle == nil {
+		_ = syscall.Close(fd)
+		return File{}, false, audioError("descripteur du snapshot WAV invalide", nil)
 	}
 	info, err := handle.Stat()
 	if err != nil {

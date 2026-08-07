@@ -4,6 +4,12 @@ BINDIR ?= $(PREFIX)/bin
 DATADIR ?= $(PREFIX)/share
 DOCDIR ?= $(DATADIR)/doc/murmur
 INSTALL_OSD ?= 0
+GO ?= go
+PYTHON ?= python3
+GO_TEST_FLAGS ?= -race
+GOVULNDB ?= https://vuln.go.dev
+GOVULNCHECK_VERSION ?= v1.1.4
+GOVULNCHECK ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 
 DOC_FILES := \
 	acceptance.md \
@@ -25,18 +31,49 @@ DOC_FILES := \
 	text-pipeline.md
 EXAMPLE_FILES := config.minimal.toml config.full.toml
 
-.PHONY: build test lint clean install uninstall installcheck check-install-vars
+.PHONY: build test test-go test-osd lint module-check vuln-check clean install uninstall installcheck check-install-vars
 
 build:
 	mkdir -p build
-	go build -trimpath -o build/murmur ./cmd/murmur
+	$(GO) build -trimpath -o build/murmur ./cmd/murmur
 
-test:
-	go test -race ./...
+test: test-go test-osd
+
+test-go:
+	$(GO) test $(GO_TEST_FLAGS) ./...
+
+test-osd:
+	$(PYTHON) -m unittest helpers/osd-gtk/test_murmur_osd.py
 
 lint:
 	test -z "$$(gofmt -l .)"
-	go vet ./...
+	$(GO) vet ./...
+
+module-check:
+	$(GO) mod verify
+	$(GO) mod tidy -diff
+
+vuln-check:
+	@tmp="$$(mktemp)"; \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	if GOVULNDB="$(GOVULNDB)" $(GOVULNCHECK) ./... >"$$tmp" 2>&1; then \
+		cat "$$tmp"; \
+	else \
+		status="$$?"; \
+		cat "$$tmp"; \
+		if grep -Eq '^[[:space:]]*Vulnerability #[0-9]+:' "$$tmp"; then \
+			exit 3; \
+		elif test "$$status" -eq 3; then \
+			exit 3; \
+		elif grep -Eiq 'vuln.*db|database|GOVULNDB|vuln\.go\.dev' "$$tmp"; then \
+			printf '%s\n' 'govulncheck: base de vulnérabilités injoignable' >&2; \
+			exit 2; \
+		elif grep -Eiq 'lookup|dial tcp|i/o timeout|TLS handshake|connection refused|no such host|proxyconnect|context deadline' "$$tmp"; then \
+			printf '%s\n' 'govulncheck: ressource réseau injoignable' >&2; \
+			exit 2; \
+		fi; \
+		exit "$$status"; \
+	fi
 
 clean:
 	rm -rf build

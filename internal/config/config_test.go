@@ -18,7 +18,11 @@ import (
 func TestExamplesResolve(t *testing.T) {
 	for _, name := range []string{"config.minimal.toml", "config.full.toml"} {
 		t.Run(name, func(t *testing.T) {
-			cfg, err := Resolve(filepath.Join("..", "..", "examples", name), Overrides{})
+			body, err := os.ReadFile(filepath.Join("..", "..", "examples", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Resolve(writeConfig(t, string(body)), Overrides{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -193,6 +197,9 @@ func TestResolveAcceptsConfigSymlinksAtEveryLevel(t *testing.T) {
 
 func TestResolveAcceptsImplicitXDGConfigDirectorySymlink(t *testing.T) {
 	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	target := filepath.Join(base, "dotfiles")
 	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
@@ -961,6 +968,9 @@ func TestSecretResolverSources(t *testing.T) {
 func TestSecretResolverRejectsLoosePermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(path, []byte("do-not-leak"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := (SecretResolver{}).Resolve(context.Background(), ProviderConfig{APIKeyFile: path})

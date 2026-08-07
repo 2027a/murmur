@@ -68,12 +68,13 @@ func TestAcceptance_01_LANNominalCleansAndPastesOnce(t *testing.T) {
 
 	executor := &sysexec.FakeExecutor{}
 	o := buildOrchestrator(t, cfg, buildFixture(t, time.Second), executor, nil, nil, false)
+	beforeSTT, beforeCleanup := sttCalls.Load(), cleanupCalls.Load()
 	result, runErr := stopSession(t, o)
 	if runErr != nil || result.Result != session.Completed || result.Provider != "local" {
 		t.Fatalf("result=%#v error=%v", result, runErr)
 	}
-	if sttCalls.Load() != 1 || cleanupCalls.Load() != 1 {
-		t.Fatalf("calls: stt=%d cleanup=%d", sttCalls.Load(), cleanupCalls.Load())
+	if sttCalls.Load()-beforeSTT != 1 || cleanupCalls.Load()-beforeCleanup != 1 {
+		t.Fatalf("calls delta: stt=%d cleanup=%d", sttCalls.Load()-beforeSTT, cleanupCalls.Load()-beforeCleanup)
 	}
 	calls := executor.Calls()
 	if len(calls) != 2 || calls[0].Name != "wl-copy" || string(calls[0].Stdin) != "bonjour propre" || calls[1].Name != "wtype" {
@@ -771,6 +772,9 @@ func TestAcceptance_12_NoUIOrDesktopToolsRequiredForStdout(t *testing.T) {
 			t.Fatalf("build binary: %v\n%s", err, output)
 		}
 		base := t.TempDir()
+		if err := os.Chmod(base, 0o700); err != nil {
+			t.Fatal(err)
+		}
 		configDir := filepath.Join(base, "config", "murmur")
 		if err := os.MkdirAll(configDir, 0o700); err != nil {
 			t.Fatal(err)
@@ -822,8 +826,8 @@ func TestAcceptance_12_NoUIOrDesktopToolsRequiredForStdout(t *testing.T) {
 		tools := t.TempDir()
 		writeExecutable(t, filepath.Join(tools, "pw-record"), `#!/bin/sh
 for output do :; done
-cp "$MURMUR_TEST_WAV" "$output" || exit 1
 trap 'exit 130' INT TERM
+cp "$MURMUR_TEST_WAV" "$output" || exit 1
 [ -z "$MURMUR_TEST_READY" ] || : > "$MURMUR_TEST_READY"
 while :; do sleep 1; done
 `)
@@ -904,8 +908,8 @@ while :; do sleep 1; done
 
 		writeExecutable(t, filepath.Join(tools, "pw-record"), `#!/bin/sh
 for output do :; done
+trap 'exit 130' INT TERM
 cp "$MURMUR_TEST_WAV" "$output" || exit 1
-sleep 1
 exit 0
 `)
 		beforeSTT, beforeCleanup := sttCalls.Load(), cleanupCalls.Load()
@@ -953,12 +957,13 @@ exit 0
 		if err := os.WriteFile(invalid, []byte("not a wav"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		beforeInvalidSTT, beforeInvalidCleanup := sttCalls.Load(), cleanupCalls.Load()
 		stdout, stderr, code = runSubprocess(t, env, nil, binary, "transcribe", "--json", invalid)
 		if code != 1 || len(stderr) != 0 || !bytes.Contains(stdout, []byte(`"class":"audio_failed"`)) || bytes.Contains(stdout, []byte("not a wav")) {
 			t.Fatalf("invalid WAV code=%d stdout=%q stderr=%q", code, stdout, stderr)
 		}
-		if sttCalls.Load() != 5 || cleanupCalls.Load() != 5 {
-			t.Fatalf("provider calls: stt=%d cleanup=%d", sttCalls.Load(), cleanupCalls.Load())
+		if sttCalls.Load() != beforeInvalidSTT || cleanupCalls.Load() != beforeInvalidCleanup {
+			t.Fatalf("provider called for invalid WAV: stt=%d cleanup=%d", sttCalls.Load()-beforeInvalidSTT, cleanupCalls.Load()-beforeInvalidCleanup)
 		}
 
 		missingBase := t.TempDir()
@@ -1075,8 +1080,8 @@ func TestBinaryProcessStartReexecSocketStopAndCancel(t *testing.T) {
 	fixture := buildFixture(t, time.Second)
 	writeExecutable(t, filepath.Join(tools, "pw-record"), `#!/bin/sh
 for output do :; done
-cp "$MURMUR_TEST_WAV" "$output" || exit 1
 trap 'exit 130' INT TERM
+cp "$MURMUR_TEST_WAV" "$output" || exit 1
 while :; do sleep 1; done
 `)
 
@@ -1252,6 +1257,9 @@ while :; do sleep 1; done
 		t.Run(command, func(t *testing.T) {
 			before := providerCalls.Load()
 			base := t.TempDir()
+			if err := os.Chmod(base, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			configDir := filepath.Join(base, "config", "murmur")
 			if err := os.MkdirAll(configDir, 0o700); err != nil {
 				t.Fatal(err)
@@ -1295,6 +1303,9 @@ while :; do sleep 1; done
 
 	t.Run("blocked delivery releases lock and socket", func(t *testing.T) {
 		base := t.TempDir()
+		if err := os.Chmod(base, 0o700); err != nil {
+			t.Fatal(err)
+		}
 		configDir := filepath.Join(base, "config", "murmur")
 		if err := os.MkdirAll(configDir, 0o700); err != nil {
 			t.Fatal(err)
