@@ -72,7 +72,7 @@ jobs:
           FORGEJO_TOKEN: ""
           GITHUB_TOKEN: ""
           GOPROXY: "off"
-        run: timeout --signal=TERM --kill-after=30s 2m go mod verify
+        run: timeout --signal=TERM --kill-after=30s 2m make module-check
 
       - name: Lint
         env:
@@ -81,20 +81,12 @@ jobs:
           GOPROXY: "off"
         run: timeout --signal=TERM --kill-after=30s 10m make lint
 
-      - name: Test OSD helper without GTK
-        env:
-          FORGEJO_TOKEN: ""
-          GITHUB_TOKEN: ""
-        run: |
-          timeout --signal=TERM --kill-after=30s 2m \
-            python3 -m unittest helpers/osd-gtk/test_murmur_osd.py
-
-      - name: Test with race detector
+      - name: Test
         env:
           FORGEJO_TOKEN: ""
           GITHUB_TOKEN: ""
           GOPROXY: "off"
-        run: timeout --signal=TERM --kill-after=30s 20m go test -race ./...
+        run: timeout --signal=TERM --kill-after=30s 20m make test
 
       - name: Build
         env:

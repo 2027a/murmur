@@ -100,7 +100,7 @@ func TestFakeRecorderEmptyCapture(t *testing.T) {
 }
 
 func TestRetentionIsBounded(t *testing.T) {
-	diagnostics := filepath.Join(t.TempDir(), "diagnostics")
+	diagnostics := filepath.Join(privateTempDir(t), "diagnostics")
 	for i := 0; i < 4; i++ {
 		recorder := &FakeRecorder{FixturePath: audioFixture(t, 120*time.Millisecond)}
 		recording, err := recorder.Start(context.Background(), RecordOptions{
@@ -154,7 +154,7 @@ func TestRetentionIsBounded(t *testing.T) {
 }
 
 func TestWavFileReleaseRetainsValidatedSnapshotBytes(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	captureDir := filepath.Join(root, "capture")
 	if err := os.Mkdir(captureDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -301,7 +301,7 @@ func TestRetentionRejectsExistingUnsafeModeWithoutChmod(t *testing.T) {
 }
 
 func TestRetentionSubstitutionDoesNotEscapeValidatedStore(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	storePath := filepath.Join(root, "recordings")
 	store, err := xdg.OpenPrivateDir(storePath)
 	if err != nil {
@@ -344,7 +344,7 @@ func TestRetentionSourceSubstitutionLeavesReplacementUntouched(t *testing.T) {
 	if err := os.WriteFile(source, []byte("original-audio"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	diagnostics := filepath.Join(t.TempDir(), "diagnostics")
+	diagnostics := filepath.Join(privateTempDir(t), "diagnostics")
 	reached := make(chan struct{})
 	resume := make(chan struct{})
 	var resumeOnce sync.Once
@@ -435,7 +435,7 @@ func TestRetentionRejectsNonRegularSourceWithoutBlocking(t *testing.T) {
 }
 
 func TestRetentionNeverPrunesCurrentCapture(t *testing.T) {
-	diagnostics := filepath.Join(t.TempDir(), "diagnostics")
+	diagnostics := filepath.Join(privateTempDir(t), "diagnostics")
 	retain := func(content string) string {
 		t.Helper()
 		root := t.TempDir()
@@ -466,7 +466,7 @@ func TestRetentionNeverPrunesCurrentCapture(t *testing.T) {
 }
 
 func TestRetentionConcurrentTransactionsRemainBounded(t *testing.T) {
-	diagnostics := filepath.Join(t.TempDir(), "diagnostics")
+	diagnostics := filepath.Join(privateTempDir(t), "diagnostics")
 	const workers = 24
 	start := make(chan struct{})
 	errorsSeen := make(chan error, workers)
@@ -842,4 +842,13 @@ func readWAVFileData(t *testing.T, file wav.File) []byte {
 		t.Fatalf("lecture WAV: %v, %v", readErr, closeErr)
 	}
 	return data
+}
+
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

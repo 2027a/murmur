@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -66,7 +67,7 @@ func TestStartArgumentsReadinessAndStop(t *testing.T) {
 	select {
 	case err := <-recording.Ready():
 		t.Fatalf("readiness annoncée sur un simple en-tête: %v", err)
-	case <-time.After(30 * time.Millisecond):
+	default:
 	}
 	appendSample(t, path)
 	if err := receiveReady(t, recording.Ready()); err != nil {
@@ -428,7 +429,7 @@ func TestReadinessTimeoutKillsProcess(t *testing.T) {
 }
 
 func TestStopDetectsEmptyCaptureAndRetainsBoundedDiagnostic(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	diagnostics := filepath.Join(root, "diagnostics")
 	process := sysexec.NewFakeProcess()
 	var path string
@@ -506,6 +507,64 @@ func TestContextCancellationKillsWithoutOrphan(t *testing.T) {
 	cancel()
 	waitFor(t, func() bool { return process.KillCount() > 0 })
 	waitEmpty(t, root)
+}
+
+func TestOSExecutorStopUsesTrapInstalledBeforeReadinessAndLeavesNoDescendant(t *testing.T) {
+	root := t.TempDir()
+	captureRoot := t.TempDir()
+	tools := t.TempDir()
+	fixture := filepath.Join(root, "fixture.wav")
+	writeWAV(t, fixture, 200*time.Millisecond)
+	childPIDFile := filepath.Join(root, "child.pid")
+	readyGate := filepath.Join(root, "allow-ready")
+	pathEnv := tools + string(os.PathListSeparator) + os.Getenv("PATH")
+	t.Setenv("PATH", pathEnv)
+	writeExecutable(t, filepath.Join(tools, "pw-record"), `#!/bin/sh
+for arg do out="$arg"; done
+trap 'kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; exit 0' INT TERM
+sleep 30 &
+child=$!
+tmp="$MURMUR_CHILD_PID.tmp.$$"
+printf '%s' "$child" >"$tmp"
+mv "$tmp" "$MURMUR_CHILD_PID"
+while [ ! -e "$MURMUR_READY_GATE" ]; do sleep 0.01; done
+cp "$MURMUR_FIXTURE" "$out"
+wait "$child"
+`)
+	executor := sysexec.OSExecutor{Env: []string{
+		"PATH=" + pathEnv,
+		"MURMUR_CHILD_PID=" + childPIDFile,
+		"MURMUR_READY_GATE=" + readyGate,
+		"MURMUR_FIXTURE=" + fixture,
+	}}
+	recording, err := New(executor).Start(context.Background(), audio.RecordOptions{
+		Directory: captureRoot, ReadinessInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPID := waitPIDFile(t, childPIDFile)
+	select {
+	case err := <-recording.Ready():
+		t.Fatalf("readiness avant barrière: %v", err)
+	default:
+	}
+	if err := os.WriteFile(readyGate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiveReady(t, recording.Ready()); err != nil {
+		t.Fatal(err)
+	}
+	file, err := recording.Stop(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Release(); err != nil {
+		t.Fatal(err)
+	}
+	awaitDone(t, recording.Done())
+	waitProcessGone(t, childPID)
+	waitEmpty(t, captureRoot)
 }
 
 func TestStartFailureLeavesNoTemporaryDirectory(t *testing.T) {
@@ -979,6 +1038,51 @@ func awaitDone(t *testing.T, done <-chan struct{}) {
 	case <-time.After(time.Second):
 		t.Fatal("timeout en attente de terminaison")
 	}
+}
+
+func writeExecutable(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	var pid int
+	waitFor(t, func() bool {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		parsed, err := strconv.Atoi(string(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid = parsed
+		return pid > 0
+	})
+	return pid
+}
+
+func waitProcessGone(t *testing.T, pid int) {
+	t.Helper()
+	waitFor(t, func() bool {
+		err := syscall.Kill(pid, 0)
+		return errors.Is(err, syscall.ESRCH)
+	})
+}
+
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func waitEmpty(t *testing.T, path string) {

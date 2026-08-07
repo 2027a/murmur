@@ -17,7 +17,8 @@ func TestStateHomeRejectsRelativeBase(t *testing.T) {
 }
 
 func TestOpenPrivateDirCreatesPrivateChain(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "state", "nested")
+	root := privateTempDir(t)
+	base := filepath.Join(root, "state", "nested")
 	dir, err := OpenPrivateDir(base, "murmur", "recordings")
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +107,7 @@ func TestOpenPrivateDirRejectsModeAndInjectedOwnerWithoutChangingMode(t *testing
 }
 
 func TestPrivateDirDetectsPathSubstitutionAndStaysAnchored(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	path := filepath.Join(root, "recordings")
 	dir, err := OpenPrivateDir(path)
 	if err != nil {
@@ -144,7 +145,7 @@ func TestPrivateDirDetectsPathSubstitutionAndStaysAnchored(t *testing.T) {
 
 func TestConfigDir(t *testing.T) {
 	t.Run("XDG_CONFIG_HOME", func(t *testing.T) {
-		base := t.TempDir()
+		base := privateTempDir(t)
 		t.Setenv("XDG_CONFIG_HOME", base)
 		got, err := ConfigDir()
 		if err != nil || got != filepath.Join(base, "murmur") {
@@ -210,7 +211,7 @@ func TestRuntimeDirRejectsWritableParentComponent(t *testing.T) {
 }
 
 func TestConfigDirAcceptsSafeSymlink(t *testing.T) {
-	base := t.TempDir()
+	base := privateTempDir(t)
 	t.Setenv("XDG_CONFIG_HOME", base)
 	target := t.TempDir()
 	if err := os.Chmod(target, 0o755); err != nil {
@@ -273,7 +274,7 @@ func TestPrivateDirsRejectUnsafeModes(t *testing.T) {
 }
 
 func TestRuntimeDirIgnoresSquattedLegacyFallback(t *testing.T) {
-	root := t.TempDir()
+	root := privateTempDir(t)
 	legacyParent := filepath.Join(root, "tmp")
 	if err := os.Mkdir(legacyParent, 0o777); err != nil {
 		t.Fatal(err)
@@ -431,4 +432,13 @@ func TestWriteFileAtomicFailedRenameLeavesNoPartialFile(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name() != "destination" || !entries[0].IsDir() {
 		t.Fatalf("partial files left behind: %#v", entries)
 	}
+}
+
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

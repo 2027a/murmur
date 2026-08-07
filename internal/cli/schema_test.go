@@ -87,7 +87,7 @@ func TestRealComposableCommandResultsConformToContract(t *testing.T) {
 	}))
 	defer server.Close()
 
-	dir := t.TempDir()
+	dir := privateCLITempDir(t)
 	configPath := filepath.Join(dir, "config.toml")
 	configBody := fmt.Sprintf(`[stt.providers.local]
 type = "openai-compatible"
