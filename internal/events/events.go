@@ -1,6 +1,7 @@
 package events
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -59,14 +60,78 @@ func (e Event) Validate() error {
 	if e.SessionID == "" {
 		return fmt.Errorf("identifiant de session manquant")
 	}
+	if e.Partial < 0 || e.Total < 0 || e.Partial > 0 && e.Total > 0 && e.Partial > e.Total {
+		return fmt.Errorf("index partiel invalide")
+	}
+	switch e.Type {
+	case SessionStarted, CaptureReady:
+		if e.State == "" || e.Result != "" || e.Provider != "" || e.ErrorClass != "" || e.Component != "" || e.Partial != 0 || e.Total != 0 {
+			return fmt.Errorf("événement d'état incohérent")
+		}
+	case StateChanged:
+		if e.State == "" || e.Result != "" || e.ErrorClass != "" || e.Component != "" || e.Partial != 0 || e.Total != 0 {
+			return fmt.Errorf("événement d'état incohérent")
+		}
+	case PartialStarted, PartialDone:
+		if e.State == "" || e.Provider == "" || e.Component != "stt" || e.Partial < 1 || e.Result != "" || e.ErrorClass != "" {
+			return fmt.Errorf("événement partiel incohérent")
+		}
+	case PartialFailed:
+		if e.State == "" || e.Provider == "" || e.Component != "stt" || e.ErrorClass == "" || e.Partial < 1 || e.Result != "" {
+			return fmt.Errorf("échec partiel incohérent")
+		}
+	case ProviderSelected:
+		if e.State == "" || e.Result != "" || e.ErrorClass != "" || e.Component != "" || e.Partial != 0 || e.Total != 0 {
+			return fmt.Errorf("sélection de fournisseur incohérente")
+		}
+	case Degraded:
+		if e.State == "" || e.ErrorClass == "" || e.Component == "" || e.Result != "" || e.Partial != 0 || e.Total != 0 {
+			return fmt.Errorf("événement dégradé incohérent")
+		}
+	case Delivered:
+		if e.State == "" || e.Result != "" || e.ErrorClass != "" || e.Component != "" || e.Partial != 0 || e.Total != 0 {
+			return fmt.Errorf("événement de livraison incohérent")
+		}
+	case Terminal:
+		if e.State != "idle" || e.Result == "" || e.Partial != 0 || e.Total != 0 {
+			return fmt.Errorf("événement terminal incohérent")
+		}
+		switch e.Result {
+		case "completed":
+			if e.ErrorClass != "" || e.Component != "" {
+				return fmt.Errorf("résultat terminal incohérent")
+			}
+		case "cancelled", "no_speech", "failed":
+			if e.ErrorClass == "" {
+				return fmt.Errorf("classe terminale manquante")
+			}
+		default:
+			return fmt.Errorf("résultat terminal invalide")
+		}
+	}
 	return nil
 }
 
 func EncodeJSONL(w io.Writer, event Event) error {
-	if err := event.Validate(); err != nil {
+	line, err := MarshalJSONL(event)
+	if err != nil {
 		return err
 	}
-	return json.NewEncoder(w).Encode(event)
+	_, err = w.Write(line)
+	return err
+}
+
+func MarshalJSONL(event Event) ([]byte, error) {
+	if err := event.Validate(); err != nil {
+		return nil, err
+	}
+	var line bytes.Buffer
+	encoder := json.NewEncoder(&line)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(event); err != nil {
+		return nil, err
+	}
+	return line.Bytes(), nil
 }
 
 type Bus struct {
@@ -109,12 +174,26 @@ func (b *Bus) Subscribe(buffer int) (<-chan Event, func()) {
 }
 
 func (b *Bus) Publish(event Event) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.closed {
 		return
 	}
 	for _, subscriber := range b.subscribers {
+		if event.Type == Terminal {
+			select {
+			case subscriber <- event:
+				continue
+			default:
+			}
+			// Preserve terminal delivery by evicting one stale progress event.
+			select {
+			case <-subscriber:
+			default:
+			}
+			subscriber <- event
+			continue
+		}
 		select {
 		case subscriber <- event:
 		default:

@@ -127,6 +127,36 @@ func TestCleanupMissingConfiguredProviderIsStructuredFailure(t *testing.T) {
 	}
 }
 
+func TestCleanupStdinReadIsCancellableAndCleanedUp(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	input := newBlockingStdin()
+	ctx, cancel := context.WithCancel(context.Background())
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- (App{Stdin: input}).Run(ctx, []string{"cleanup", "--json"}, &stdout, &stderr)
+	}()
+	waitChannel(t, input.started, "stdin read")
+	cancel()
+
+	select {
+	case code := <-done:
+		if code != 1 || stderr.Len() != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cleanup cancellation did not return")
+	}
+	waitChannel(t, input.finished, "stdin goroutine")
+	var result commandResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Success || result.Error == nil || result.Error.Class != errs.Cancelled || result.Provider != "" {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
 func TestCleanupHTTP503PreservesClassInJSONAndEvents(t *testing.T) {
 	const canary = "MURMUR-SENSITIVE-CLEANUP-CLI-CANARY"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -587,17 +617,67 @@ func TestDictateEOFAndContextRemainNormalStops(t *testing.T) {
 		cancel()
 		select {
 		case err := <-result:
-			if err != nil {
-				t.Fatal(err)
+			if errs.Classify(err) != errs.Cancelled {
+				t.Fatalf("error=%v class=%s", err, errs.Classify(err))
 			}
 		case <-time.After(time.Second):
 			t.Fatal("context cancellation did not stop dictate wait")
 		}
-		if recording.aborts.Load() != 0 {
+		if recording.aborts.Load() != 1 {
 			t.Fatalf("Abort calls=%d", recording.aborts.Load())
 		}
 		waitChannel(t, input.cancelled, "stdin cancellation")
 	})
+}
+
+func TestDictateContextCancellationWaitsForOwnedStdinCleanup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	input := newBlockingStdin()
+	recording := newDictateRecording()
+	done := make(chan error, 1)
+	go func() {
+		done <- (App{Stdin: input}).waitForDictateStop(ctx, recording)
+	}()
+	waitChannel(t, input.started, "stdin read")
+
+	cancel()
+	select {
+	case err := <-done:
+		if errs.Classify(err) != errs.Cancelled {
+			t.Fatalf("error=%v class=%s", err, errs.Classify(err))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("context cancellation did not finish stdin cleanup")
+	}
+	waitChannel(t, input.finished, "stdin goroutine")
+	if recording.aborts.Load() != 1 {
+		t.Fatalf("Abort calls=%d", recording.aborts.Load())
+	}
+}
+
+func TestDictateInputRequiresCancelReadForBorrowedStdin(t *testing.T) {
+	input := newBlockingReader()
+	recording := newDictateRecording()
+	done := make(chan error, 1)
+	go func() {
+		done <- (App{Stdin: input}).waitForDictateStop(context.Background(), recording)
+	}()
+	select {
+	case err := <-done:
+		if errs.Classify(err) != errs.Internal || !strings.Contains(err.Error(), "CancelRead") {
+			t.Fatalf("error=%v class=%s", err, errs.Classify(err))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("borrowed stdin without CancelRead blocked cancellation")
+	}
+	if input.closed.Load() != 0 {
+		t.Fatal("borrowed stdin was closed")
+	}
+	select {
+	case <-input.started:
+		t.Fatal("borrowed non-cancellable stdin was read")
+	default:
+	}
 }
 
 type deadlineSink struct {
@@ -965,24 +1045,50 @@ func TestIPCCommandsResolveTheSameRuntimePath(t *testing.T) {
 }
 
 type blockingStdin struct {
-	started   chan struct{}
-	cancelled chan struct{}
-	startOnce sync.Once
-	cancel    sync.Once
+	started    chan struct{}
+	finished   chan struct{}
+	cancelled  chan struct{}
+	startOnce  sync.Once
+	finishOnce sync.Once
+	cancel     sync.Once
 }
 
 func newBlockingStdin() *blockingStdin {
-	return &blockingStdin{started: make(chan struct{}), cancelled: make(chan struct{})}
+	return &blockingStdin{started: make(chan struct{}), finished: make(chan struct{}), cancelled: make(chan struct{})}
 }
 
 func (r *blockingStdin) Read([]byte) (int, error) {
 	r.startOnce.Do(func() { close(r.started) })
 	<-r.cancelled
+	r.finishOnce.Do(func() { close(r.finished) })
 	return 0, io.EOF
 }
 
 func (r *blockingStdin) CancelRead() error {
 	r.cancel.Do(func() { close(r.cancelled) })
+	return nil
+}
+
+type blockingReader struct {
+	started   chan struct{}
+	release   chan struct{}
+	startOnce sync.Once
+	closed    atomic.Int32
+}
+
+func newBlockingReader() *blockingReader {
+	return &blockingReader{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *blockingReader) Read([]byte) (int, error) {
+	r.startOnce.Do(func() { close(r.started) })
+	<-r.release
+	return 0, io.EOF
+}
+
+func (r *blockingReader) Close() error {
+	r.closed.Add(1)
+	close(r.release)
 	return nil
 }
 
