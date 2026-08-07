@@ -65,6 +65,10 @@ func Classify(err error) Class {
 	if err == nil {
 		return ""
 	}
+	var effective interface{ EffectiveClass() Class }
+	if errors.As(err, &effective) {
+		return effective.EffectiveClass()
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return Timeout
 	}

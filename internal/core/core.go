@@ -101,11 +101,12 @@ func BuildProcessor(ctx context.Context, cfg config.Config, options BuildOptions
 		return nil, err
 	}
 	return textpipe.New(textpipe.Options{
-		CommandPack: cfg.General.CommandPack,
-		STTLanguage: cfg.STT.Providers[cfg.STT.Provider].Language,
-		ASCIIQuotes: cfg.General.ASCIIQuotes,
-		Cleanup:     cleaner,
-		Plugin:      grammar,
+		CommandPack:     cfg.General.CommandPack,
+		STTLanguage:     cfg.STT.Providers[cfg.STT.Provider].Language,
+		ASCIIQuotes:     cfg.General.ASCIIQuotes,
+		CleanupProvider: cfg.Cleanup.Provider,
+		Cleanup:         cleaner,
+		Plugin:          grammar,
 	})
 }
 

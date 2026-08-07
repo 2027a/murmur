@@ -359,6 +359,61 @@ func TestDoubleFailurePreservesCausesWithoutLeakingMessages(t *testing.T) {
 	}
 }
 
+func TestFallbackClassWinsOverPrimaryDeadline(t *testing.T) {
+	primaryErr := context.DeadlineExceeded
+	fallbackErr := errs.New(errs.AuthFailed, "fallback", "authentication failed")
+	primary := &fakeProvider{name: "primary", errors: map[string]error{"0": primaryErr}}
+	fallback := &fakeProvider{name: "fallback", errors: map[string]error{"0": fallbackErr}}
+	chain, err := NewChain(primary, fallback, MultiOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = chain.TranscribeSegments(context.Background(), segments("0"), Progress{})
+	if errs.Classify(err) != errs.AuthFailed || ProviderFromError(err) != "fallback" {
+		t.Fatalf("error=%v class=%s provider=%q", err, errs.Classify(err), ProviderFromError(err))
+	}
+	if !errors.Is(err, primaryErr) || !errors.Is(err, fallbackErr) {
+		t.Fatalf("causes perdues: %v", err)
+	}
+}
+
+func TestMixedPartialAllSegmentsFailedPreservesEffectiveFallbackError(t *testing.T) {
+	for _, mode := range []string{"batch", "stream"} {
+		t.Run(mode, func(t *testing.T) {
+			primaryErr := errs.New(errs.AuthFailed, "primary", "primary-secret")
+			fallbackErr := errs.New(errs.Timeout, "fallback", "fallback-secret")
+			primary := &fakeProvider{name: "primary", errors: map[string]error{"0": primaryErr}}
+			fallback := &fakeProvider{name: "fallback", errors: map[string]error{"0": fallbackErr}}
+			chain, err := NewChain(primary, fallback, MultiOptions{AllowMixedProviders: true, AllowPartial: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var result MultiResult
+			if mode == "batch" {
+				result, err = chain.TranscribeSegments(context.Background(), segments("0"), Progress{})
+			} else {
+				input := make(chan Segment, 1)
+				input <- segments("0")[0]
+				close(input)
+				result, err = chain.TranscribeStream(context.Background(), input, Progress{})
+			}
+			if errs.Classify(err) != errs.Timeout || ProviderFromError(err) != "fallback" {
+				t.Fatalf("result=%#v error=%v class=%s provider=%q", result, err, errs.Classify(err), ProviderFromError(err))
+			}
+			if !errors.Is(err, primaryErr) || !errors.Is(err, fallbackErr) {
+				t.Fatalf("causes perdues: %v", err)
+			}
+			if strings.Contains(err.Error(), "primary-secret") || strings.Contains(err.Error(), "fallback-secret") {
+				t.Fatalf("message sensible exposé: %v", err)
+			}
+			if result.Text != "" || result.Segments != nil {
+				t.Fatalf("partial result leaked: %#v", result)
+			}
+		})
+	}
+}
+
 func TestStreamWorkerPoolIsBoundedAndResultsAreOrdered(t *testing.T) {
 	var active, maximum atomic.Int32
 	provider := providerFunc{name: "primary", transcribe: func(_ context.Context, request Request) (Result, error) {

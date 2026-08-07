@@ -485,7 +485,8 @@ func TestPipelineWarningClassesReachEventsAndLastResult(t *testing.T) {
 	for _, class := range []errs.Class{errs.ServerError, errs.Timeout, errs.AuthFailed, errs.PolicyBlocked, errs.Unavailable} {
 		t.Run(string(class), func(t *testing.T) {
 			pipeline, err := textpipe.New(textpipe.Options{
-				CommandPack: "fr",
+				CommandPack:     "fr",
+				CleanupProvider: "cleanup",
 				Cleanup: textpipe.CleanupFunc(func(context.Context, string, textpipe.Protection) (string, error) {
 					return "", errs.Wrap(class, "unsafe/"+canary, "unsafe "+canary, errors.New("cause "+canary))
 				}),
@@ -504,11 +505,12 @@ func TestPipelineWarningClassesReachEventsAndLastResult(t *testing.T) {
 				t.Fatalf("result=%#v", result)
 			}
 			warning := result.Warnings[0]
-			if warning.Class != class || warning.Provider != "primary" || warning.Component != "cleanup" {
+			if warning.Class != class || warning.Provider != "cleanup" || warning.Component != "cleanup" {
 				t.Fatalf("warning=%#v", warning)
 			}
 			persisted, err := ReadLastResult(o.runtimeDir)
-			if err != nil || len(persisted.Warnings) != 1 || persisted.Warnings[0].Class != class {
+			if err != nil || len(persisted.Warnings) != 1 || persisted.Warnings[0].Class != class ||
+				persisted.Warnings[0].Provider != "cleanup" {
 				t.Fatalf("persisted=%#v error=%v", persisted, err)
 			}
 			encoded, err := json.Marshal(persisted)
@@ -521,7 +523,8 @@ func TestPipelineWarningClassesReachEventsAndLastResult(t *testing.T) {
 			var degraded bool
 			for len(stream) > 0 {
 				event := <-stream
-				degraded = degraded || event.Type == events.Degraded && event.ErrorClass == class && event.Component == "cleanup"
+				degraded = degraded || event.Type == events.Degraded && event.Provider == "cleanup" &&
+					event.ErrorClass == class && event.Component == "cleanup"
 			}
 			if !degraded {
 				t.Fatalf("classified degraded event missing from %s", class)

@@ -424,10 +424,14 @@ func (o *Orchestrator) completeTranscript(transcript, provider string, warnings 
 		return o.fail(err)
 	}
 	for _, warning := range processed.Warnings {
+		warningProvider := warning.Provider
+		if warningProvider == "" {
+			warningProvider = provider
+		}
 		o.addWarning(ResultWarning{
-			Class: warning.Class, Provider: provider, Component: warning.Component, Message: warning.Message,
+			Class: warning.Class, Provider: warningProvider, Component: warning.Component, Message: warning.Message,
 		})
-		o.publish(events.Degraded, provider, warning.Class, warning.Component, 0, 0)
+		o.publish(events.Degraded, warningProvider, warning.Class, warning.Component, 0, 0)
 	}
 	if strings.TrimSpace(processed.Text) == "" {
 		_ = o.machine.ApplyTerminal(NoSpeechCommand, provider, errs.NoSpeech)
