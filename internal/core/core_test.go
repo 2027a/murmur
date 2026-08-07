@@ -58,6 +58,9 @@ func TestBuildProcessorPreservesCleanupHTTP503Class(t *testing.T) {
 	if result.Text != "texte" || len(result.Warnings) != 1 || result.Warnings[0].Class != errs.ServerError || result.Warnings[0].Component != "cleanup" {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Warnings[0].Provider != "cleanup" {
+		t.Fatalf("cleanup provider=%q", result.Warnings[0].Provider)
+	}
 	if strings.Contains(result.Warnings[0].Message, canary) {
 		t.Fatalf("sensitive HTTP body leaked in warning: %#v", result.Warnings[0])
 	}
