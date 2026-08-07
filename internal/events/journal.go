@@ -1,13 +1,13 @@
 package events
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 )
 
 type JournalOperation string
@@ -17,6 +17,7 @@ const (
 	JournalStat    JournalOperation = "stat"
 	JournalRename  JournalOperation = "rename"
 	JournalWrite   JournalOperation = "write"
+	JournalBounds  JournalOperation = "bounds"
 	JournalReopen  JournalOperation = "reopen"
 	JournalClose   JournalOperation = "close"
 )
@@ -44,7 +45,7 @@ func (e *JournalError) Unwrap() error { return e.Err }
 // closed operation name, never an event, an underlying error or a path.
 func JournalFailureMessage(operation JournalOperation) string {
 	switch operation {
-	case JournalMarshal, JournalStat, JournalRename, JournalWrite, JournalReopen, JournalClose:
+	case JournalMarshal, JournalStat, JournalRename, JournalWrite, JournalBounds, JournalReopen, JournalClose:
 		return fmt.Sprintf("journal de session dégradé (%s)", operation)
 	default:
 		return "journal de session dégradé"
@@ -67,15 +68,7 @@ func defaultJournalOperations() *journalOperations {
 		remove: os.Remove,
 		write:  func(file *os.File, data []byte) (int, error) { return file.Write(data) },
 		open: func(path string, flags int) (*os.File, error) {
-			file, err := os.OpenFile(path, flags, 0o600)
-			if err != nil {
-				return nil, err
-			}
-			if err := file.Chmod(0o600); err != nil {
-				_ = file.Close()
-				return nil, err
-			}
-			return file, nil
+			return secureOpenJournalFile(path, flags)
 		},
 		close: func(file *os.File) error { return file.Close() },
 	}
@@ -173,14 +166,18 @@ func (j *Journal) Close() error {
 func (j *Journal) run() {
 	defer close(j.done)
 	for event := range j.stream {
-		line, err := json.Marshal(event)
+		line, err := MarshalJSONL(event)
 		if err != nil {
 			j.recordFailure(JournalMarshal, err)
 			continue
 		}
-		line = append(line, '\n')
+		if int64(len(line)) > j.options.MaxBytes {
+			j.recordFailure(JournalBounds, fmt.Errorf("événement plus grand que la limite du journal"))
+			continue
+		}
 		if err := j.rotateIfNeeded(int64(len(line))); err != nil {
 			j.recordError(err)
+			continue
 		}
 		written, err := j.operations.write(j.file, line)
 		if err == nil && written != len(line) {
@@ -283,6 +280,44 @@ func openJournal(path string, flags int, operations *journalOperations) (*os.Fil
 	file, err := operations.open(path, flags)
 	if err != nil {
 		return nil, fmt.Errorf("ouverture du journal de session: %w", err)
+	}
+	return file, nil
+}
+
+func secureOpenJournalFile(path string, flags int) (*os.File, error) {
+	fd, err := syscall.Open(path, flags|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), filepath.Base(path))
+	if file == nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("descripteur du journal invalide")
+	}
+	if err := syscall.Fchmod(fd, 0o600); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(fd, &stat); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if stat.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		_ = file.Close()
+		return nil, fmt.Errorf("le journal de session n'est pas un fichier régulier")
+	}
+	if stat.Uid != uint32(os.Geteuid()) {
+		_ = file.Close()
+		return nil, fmt.Errorf("propriétaire du journal de session invalide")
+	}
+	if stat.Nlink != 1 {
+		_ = file.Close()
+		return nil, fmt.Errorf("nombre de liens du journal de session invalide")
+	}
+	if stat.Mode&0o777 != 0o600 {
+		_ = file.Close()
+		return nil, fmt.Errorf("mode du journal de session invalide")
 	}
 	return file, nil
 }

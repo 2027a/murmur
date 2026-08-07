@@ -101,7 +101,20 @@ func (m *Machine) ApplyTerminal(command Command, provider string, class errs.Cla
 func (m *Machine) SetPublisher(bus publisher) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if gate, ok := m.bus.(*publicationGate); ok {
+		gate.setTarget(bus)
+		return
+	}
 	m.bus = bus
+}
+
+func (m *Machine) Publish(event events.Event) {
+	m.mu.Lock()
+	bus := m.bus
+	m.mu.Unlock()
+	if bus != nil {
+		bus.Publish(event)
+	}
 }
 
 func (m *Machine) apply(command Command, provider string, class errs.Class) error {
@@ -115,6 +128,10 @@ func (m *Machine) apply(command Command, provider string, class errs.Class) erro
 	case Idle:
 		if command == StartCommand || command == ToggleCommand {
 			m.transition(Starting, events.SessionStarted)
+			return nil
+		}
+		if command == CancelCommand {
+			m.terminal(Cancelled, provider, class)
 			return nil
 		}
 	case Starting:

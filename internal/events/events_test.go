@@ -15,15 +15,36 @@ import (
 )
 
 func testEvent(kind Type) Event {
-	return Event{
-		Version:    1,
-		Type:       kind,
-		Timestamp:  time.Date(2026, 7, 29, 12, 34, 56, 0, time.UTC),
-		SessionID:  "session-1",
-		State:      "transcribing",
-		Provider:   "speaches",
-		ErrorClass: errs.Timeout,
+	event := Event{
+		Version:   1,
+		Type:      kind,
+		Timestamp: time.Date(2026, 7, 29, 12, 34, 56, 0, time.UTC),
+		SessionID: "session-1",
+		State:     "transcribing",
 	}
+	switch kind {
+	case PartialStarted, PartialDone:
+		event.Provider = "speaches"
+		event.Component = "stt"
+		event.Partial = 1
+		event.Total = 2
+	case PartialFailed:
+		event.Provider = "speaches"
+		event.Component = "stt"
+		event.ErrorClass = errs.Timeout
+		event.Partial = 1
+		event.Total = 2
+	case ProviderSelected, Delivered:
+		event.Provider = "speaches"
+	case Degraded:
+		event.Provider = "speaches"
+		event.ErrorClass = errs.Timeout
+		event.Component = "cleanup"
+	case Terminal:
+		event.State = "idle"
+		event.Result = "completed"
+	}
+	return event
 }
 
 func TestEncodeJSONLGolden(t *testing.T) {
@@ -31,7 +52,7 @@ func TestEncodeJSONLGolden(t *testing.T) {
 	if err := EncodeJSONL(&got, testEvent(PartialFailed)); err != nil {
 		t.Fatal(err)
 	}
-	want := "{\"v\":1,\"type\":\"partial_failed\",\"timestamp\":\"2026-07-29T12:34:56Z\",\"session_id\":\"session-1\",\"state\":\"transcribing\",\"provider\":\"speaches\",\"error_class\":\"timeout\"}\n"
+	want := "{\"v\":1,\"type\":\"partial_failed\",\"timestamp\":\"2026-07-29T12:34:56Z\",\"session_id\":\"session-1\",\"state\":\"transcribing\",\"provider\":\"speaches\",\"error_class\":\"timeout\",\"component\":\"stt\",\"partial\":1,\"total\":2}\n"
 	if got.String() != want {
 		t.Fatalf("JSONL:\n got %s want %s", got.String(), want)
 	}
@@ -39,6 +60,15 @@ func TestEncodeJSONLGolden(t *testing.T) {
 
 func TestEventRejectsUnknownType(t *testing.T) {
 	event := testEvent("transcript")
+	if err := event.Validate(); err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestEventRejectsIncoherentTerminal(t *testing.T) {
+	event := testEvent(Terminal)
+	event.State = "recording"
+	event.Result = ""
 	if err := event.Validate(); err == nil {
 		t.Fatal("expected validation error")
 	}
@@ -71,6 +101,19 @@ func TestBusSlowSubscriberDoesNotBlock(t *testing.T) {
 	}
 	if len(fast) == 0 {
 		t.Fatal("fast subscriber received no event")
+	}
+}
+
+func TestBusTerminalEvictsStaleProgressFromFullSubscriber(t *testing.T) {
+	bus := NewBus()
+	defer bus.Close()
+	stream, unsubscribe := bus.Subscribe(1)
+	defer unsubscribe()
+	bus.Publish(Event{Type: StateChanged})
+	terminal := Event{Type: Terminal, Result: "cancelled"}
+	bus.Publish(terminal)
+	if got := <-stream; got.Type != Terminal || got.Result != "cancelled" {
+		t.Fatalf("event=%#v", got)
 	}
 }
 
@@ -134,6 +177,54 @@ func TestSessionJournalRotatesAndContainsOnlyEvents(t *testing.T) {
 	}
 }
 
+func TestJournalOpenRejectsUnsafeFilesystemTargets(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, dir string) string
+	}{
+		{"symlink", func(t *testing.T, dir string) string {
+			target := filepath.Join(dir, "target.jsonl")
+			if err := os.WriteFile(target, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "session.jsonl")
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+		{"hardlink", func(t *testing.T, dir string) string {
+			target := filepath.Join(dir, "target.jsonl")
+			if err := os.WriteFile(target, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "session.jsonl")
+			if err := os.Link(target, path); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+		{"directory", func(t *testing.T, dir string) string {
+			path := filepath.Join(dir, "session.jsonl")
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bus := NewBus()
+			defer bus.Close()
+			path := test.setup(t, t.TempDir())
+			journal, err := NewJournal(bus, path, JournalOptions{MaxBytes: 1 << 20, MaxFiles: 2})
+			if err == nil {
+				_ = journal.Close()
+				t.Fatal("expected unsafe journal target rejection")
+			}
+		})
+	}
+}
+
 func TestJournalMarshalFailureIsReportedAndNextEventIsWritten(t *testing.T) {
 	bus := NewBus()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
@@ -160,7 +251,7 @@ func TestJournalMarshalFailureIsReportedAndNextEventIsWritten(t *testing.T) {
 	}
 }
 
-func TestJournalStatFailureDoesNotDropCurrentOrLaterWrites(t *testing.T) {
+func TestJournalStatFailureDropsCurrentLineAndLaterWrites(t *testing.T) {
 	bus := NewBus()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	operations := defaultJournalOperations()
@@ -184,8 +275,26 @@ func TestJournalStatFailureDoesNotDropCurrentOrLaterWrites(t *testing.T) {
 	closeErr := journal.Close()
 	bus.Close()
 	assertJournalFailure(t, closeErr, JournalStat)
-	if got := readJournalEventCount(t, path); got != 2 {
-		t.Fatalf("written events=%d, want 2", got)
+	if got := readJournalEventCount(t, path); got != 1 {
+		t.Fatalf("written events=%d, want 1", got)
+	}
+}
+
+func TestJournalRejectsLineLargerThanLimitWithoutWriting(t *testing.T) {
+	bus := NewBus()
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	journal, err := NewJournal(bus, path, JournalOptions{
+		MaxBytes: journalLineSize(t) - 1, MaxFiles: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bus.Publish(testEvent(StateChanged))
+	closeErr := journal.Close()
+	bus.Close()
+	assertJournalFailure(t, closeErr, JournalBounds)
+	if got := readJournalEventCount(t, path); got != 0 {
+		t.Fatalf("written events=%d, want 0", got)
 	}
 }
 
@@ -217,8 +326,8 @@ func TestJournalRenameFailureKeepsActiveFileAndRetriesRotation(t *testing.T) {
 	if calls < 2 {
 		t.Fatalf("rename calls=%d, rotation was not retried", calls)
 	}
-	if got := readJournalEventCount(t, path); got != 3 {
-		t.Fatalf("written events=%d, want 3", got)
+	if got := readJournalEventCount(t, path); got != 2 {
+		t.Fatalf("written events=%d, want 2", got)
 	}
 }
 
@@ -282,8 +391,8 @@ func TestJournalReopenFailureRestoresActiveFileAndRecovers(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("active journal missing after recovery: %v", err)
 	}
-	if got := readJournalEventCount(t, path); got != 3 {
-		t.Fatalf("written events=%d, want 3", got)
+	if got := readJournalEventCount(t, path); got != 2 {
+		t.Fatalf("written events=%d, want 2", got)
 	}
 }
 

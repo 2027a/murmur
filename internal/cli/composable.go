@@ -478,10 +478,10 @@ func finishCommand(result commandResult, runErr error, jsonOutput bool, stdout, 
 		if provider := stt.ProviderFromError(runErr); provider != "" {
 			result.Provider = provider
 		}
-		emitter.emit(events.Terminal, "", result.Provider, result.Error.Class, result.Error.Component, 0, 0, "failed")
+		emitter.emit(events.Terminal, "idle", result.Provider, result.Error.Class, result.Error.Component, 0, 0, "failed")
 	} else {
 		result.Success = true
-		emitter.emit(events.Terminal, "", result.Provider, "", "", 0, 0, "completed")
+		emitter.emit(events.Terminal, "idle", result.Provider, "", "", 0, 0, "completed")
 	}
 	finishErr := runErr
 	if finishErr == nil {

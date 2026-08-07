@@ -63,6 +63,7 @@ type Orchestrator struct {
 	bus         *events.Bus
 	now         func() time.Time
 	startedAt   time.Time
+	parentCtx   context.Context
 
 	ctx        context.Context
 	cancelOps  context.CancelFunc
@@ -114,11 +115,11 @@ func NewOrchestrator(options OrchestratorOptions) (*Orchestrator, error) {
 		chunk: options.ChunkDuration, live: options.LiveChunking, transcriber: options.Transcriber, processor: options.Processor,
 		sink: sink.Once(options.Sink), ui: options.UI, bus: options.Bus, now: options.Now,
 		ctx: ctx, cancelOps: cancel, stop: make(chan struct{}, 1), runDone: make(chan struct{}),
-		startedAt: options.StartedAt,
+		startedAt: options.StartedAt, parentCtx: options.Context,
 	}
 	o.machine = options.Machine
 	if o.machine == nil {
-		o.machine = NewMachine(options.SessionID, eventPublisher{bus: options.Bus, ui: options.UI})
+		o.machine = NewMachine(options.SessionID, newPublicationGate(eventPublisher{bus: options.Bus, ui: options.UI}))
 		o.machine.now = options.Now
 	} else if o.machine.sessionID != options.SessionID {
 		cancel()
@@ -142,6 +143,11 @@ func (o *Orchestrator) Begin() error {
 	o.beginOnce.Do(func() {
 		if o.startedAt.IsZero() {
 			o.startedAt = o.now().UTC()
+		}
+		if o.parentCtx != nil && o.parentCtx.Err() != nil && o.machine.Result() == "" && o.machine.State() == Idle {
+			o.beginErr = o.machine.ApplyTerminal(CancelCommand, o.currentProvider(), errs.Cancelled)
+			o.cancelOps()
+			return
 		}
 		if o.machine.Result() == "" && o.machine.State() == Idle {
 			o.beginErr = o.machine.Apply(StartCommand)
@@ -629,7 +635,7 @@ func resultError(err error) *ResultError {
 }
 
 func (o *Orchestrator) publish(kind events.Type, provider string, class errs.Class, component string, partial, total int) {
-	eventPublisher{bus: o.bus, ui: o.ui}.Publish(events.Event{
+	o.machine.Publish(events.Event{
 		Version: 1, Type: kind, Timestamp: o.now().UTC(), SessionID: o.machine.sessionID,
 		State: string(o.machine.State()), Provider: provider, ErrorClass: class,
 		Component: component, Partial: partial, Total: total,
