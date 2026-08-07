@@ -4,16 +4,16 @@ La livraison finale implémente six modes:
 
 | Mode | Effet |
 |---|---|
-| `paste` | copie le texte selon la politique clipboard, essaie les raccourcis configurés, puis retombe sur la frappe si toutes les commandes échouent |
+| `paste` | copie le texte selon la politique clipboard, puis émet le premier raccourci configuré ou frappe directement si la liste est vide |
 | `type` | transmet le texte à `wtype -` |
 | `clipboard` | conserve le texte final dans un presse-papiers persistant |
 | `stdout` | écrit le texte suivi d'un retour à la ligne |
 | `file` | remplace atomiquement le chemin explicite, avec des permissions `0600` |
 | `auto` | devient la valeur explicite de `sink.auto_mode` (`paste` ou `type`) pendant la résolution de configuration |
 
-Chaque sink construit par `sink.New` est enveloppé par une livraison
-concurrency-safe au plus une fois. Tous les appels concurrents observent le
-résultat du premier appel effectif.
+`sink.New` retourne le sink composé directement. L'orchestrateur possède le
+garde de livraison concurrency-safe au plus une fois; tous les appels concurrents
+observent le résultat du premier appel effectif.
 
 ## Presse-papiers
 
@@ -35,10 +35,12 @@ persistant n'est jamais effacé sur erreur: un échec de `CopyFinal` en
 `raw-and-clean` peut donc laisser le brut courant, et un échec du sink après la
 copie finale laisse le final courant. Aucun de ces comportements ne prétend
 retirer les valeurs déjà capturées par un historique. `none` ne copie rien et
-`transient` tente son effacement avant de rendre le résultat. Si la deadline de
-livraison expire pendant l'injection, l'effacement reçoit un nouveau budget
-borné de cinq secondes afin que le timeout du sink ne neutralise pas la
-transaction. Une annulation explicite reste prioritaire et n'est pas détachée.
+`transient` tente son effacement exactement une fois avant de rendre le résultat,
+y compris si `CopyFinal` échoue; les erreurs de copie, sink et clear sont alors
+jointes. Si la deadline de livraison expire pendant l'injection, l'effacement
+reçoit un nouveau budget borné de cinq secondes afin que le timeout du sink ne
+neutralise pas la transaction. Une annulation explicite reste prioritaire et
+n'est pas détachée.
 
 Un mode effectif `paste` avec au moins un raccourci et
 `clipboard_mode="transient"` est refusé au preflight, avant capture. Le succès de
@@ -73,15 +75,15 @@ sink effectif, y compris en `clipboard-only`; le texte brut n'est ajouté ni aux
 Le texte issu des providers n'est pas fiable. La frontière d'injection active
 est appliquée lorsque le mode effectif est `paste` ou `type`, y compris après
 résolution de `auto`, avant tout `wl-copy` destiné à ce collage et avant tout
-`wtype -`. Elle couvre aussi la copie brute `raw-and-clean` d'une telle session
-et le fallback de `paste`, qui reçoivent donc exactement la même forme du texte.
+`wtype -`. Elle couvre aussi la copie brute `raw-and-clean` d'une telle session,
+qui reçoit donc exactement la même forme du texte.
 
 Cette frontière ne modifie pas les sinks passifs `clipboard`, `stdout` et
 `file`, leurs éventuelles copies annexes, ni une session `clipboard-only`. Ces
 sinks conservent leur contrat de transport du texte provider tel quel;
 `stdout` ajoute seulement son retour à la ligne final historique.
 
-La cascade `wtype` utilise exactement les arguments suivants:
+Les raccourcis `wtype` supportés utilisent exactement les arguments suivants:
 
 ```text
 ctrl+shift+v  -> wtype -M ctrl -M shift v -m shift -m ctrl
@@ -93,10 +95,11 @@ Toute autre chaîne dans `paste_shortcuts` est une erreur de configuration avant
 fork ou construction de l'injecteur. `inject.New` répète ce contrôle pour les
 appels directs.
 
-La cascade s'arrête au premier processus `wtype` réussi. Ce succès signifie
-seulement que la commande a été émise, pas que l'application cible a accepté le
-collage. Si toutes les émissions échouent techniquement, le texte est transmis
-à `wtype -` sur stdin.
+`paste` n'émet qu'une seule tentative active: le premier raccourci configuré. Ce
+succès signifie seulement que la commande a été émise, pas que l'application
+cible a accepté le collage. Si cette émission échoue techniquement, la livraison
+échoue; la frappe directe `wtype -` n'est utilisée que lorsque `paste_shortcuts`
+est vide.
 
 `type_newlines` applique l'un des rendus suivants à toute injection active:
 
@@ -124,12 +127,10 @@ frappe afin de ne jamais coller un ancien contenu du presse-papiers.
 ## Budget de livraison
 
 Chaque opération externe de livraison dispose d'un budget fixe de 5 secondes:
-`CopyRaw`, `CopyFinal`, la cascade de collage complète, la frappe et
-`wl-copy --clear`. Tous les raccourcis de collage et son fallback `wtype -`
-partagent une seule deadline de 5 secondes; ils ne cumulent donc pas un timeout
-par tentative. Une deadline appelante plus courte reste prioritaire pour l'effet
-principal; seul le clear transient compensatoire décrit plus haut peut recevoir
-son propre budget après son expiration.
+`CopyRaw`, `CopyFinal`, une tentative de collage, la frappe et `wl-copy --clear`.
+Une deadline appelante plus courte reste prioritaire pour l'effet principal; seul
+le clear transient compensatoire décrit plus haut peut recevoir son propre
+budget après son expiration.
 
 Après processing, un collage persistant est donc borné à 10 secondes en
 `clean-only` (copie puis injection) et à 15 secondes en `raw-and-clean` (brut,

@@ -105,7 +105,7 @@ func New(cfg config.Config, options Options) (Sink, error) {
 	if mode == Paste || mode == Type {
 		delivery = &activeTextSink{target: delivery, newlines: activeNewlines}
 	}
-	return Once(delivery), nil
+	return delivery, nil
 }
 
 type sinkFunc func(context.Context, string) error
@@ -117,8 +117,13 @@ type stdoutSink struct {
 }
 
 func (s *stdoutSink) Deliver(_ context.Context, text string) error {
-	if _, err := fmt.Fprintln(s.writer, text); err != nil {
+	payload := text + "\n"
+	n, err := io.WriteString(s.writer, payload)
+	if err != nil {
 		return errs.Wrap(errs.SinkFailed, "sink-stdout", "écriture sur stdout impossible", err)
+	}
+	if n != len(payload) {
+		return errs.New(errs.SinkFailed, "sink-stdout", "écriture incomplète sur stdout")
 	}
 	return nil
 }
@@ -163,10 +168,11 @@ func (s *clipboardSink) CopyRaw(ctx context.Context, text string) error {
 }
 
 func (s *clipboardSink) Deliver(ctx context.Context, text string) error {
-	if err := s.clipboard.CopyFinal(ctx, text); err != nil {
-		return err
+	copyErr := s.clipboard.CopyFinal(ctx, text)
+	var targetErr error
+	if copyErr == nil {
+		targetErr = s.target.Deliver(ctx, text)
 	}
-	err := s.target.Deliver(ctx, text)
 	clearCtx := ctx
 	cancelClear := func() {}
 	// A delivery deadline must not consume the transient cleanup budget;
@@ -176,7 +182,7 @@ func (s *clipboardSink) Deliver(ctx context.Context, text string) error {
 	}
 	defer cancelClear()
 	clearErr := s.clipboard.Clear(clearCtx)
-	return errors.Join(err, clearErr)
+	return errors.Join(copyErr, targetErr, clearErr)
 }
 
 type onceSink struct {
