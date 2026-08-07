@@ -34,6 +34,11 @@ type LimitedExecutor interface {
 	RunLimited(ctx context.Context, name string, args []string, stdin []byte, maxOutput int64) ([]byte, error)
 }
 
+type DiscardExecutor interface {
+	Executor
+	RunDiscard(ctx context.Context, name string, args []string, stdin []byte) error
+}
+
 var ErrOutputLimit = errors.New("sortie du processus trop volumineuse")
 
 type OSExecutor struct {
@@ -45,29 +50,37 @@ type OSExecutor struct {
 func New() Executor { return OSExecutor{} }
 
 func (e OSExecutor) Run(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error) {
-	return e.run(ctx, name, args, stdin, 0)
+	var output limitedBuffer
+	if err := e.run(ctx, name, args, stdin, &output); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
 }
 
 func (e OSExecutor) RunLimited(ctx context.Context, name string, args []string, stdin []byte, maxOutput int64) ([]byte, error) {
-	return e.run(ctx, name, args, stdin, maxOutput)
-}
-
-func (e OSExecutor) run(ctx context.Context, name string, args []string, stdin []byte, maxOutput int64) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	e.setEnv(cmd)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = 2 * time.Second
-	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }
-	cmd.Stdin = bytes.NewReader(stdin)
 	output := limitedBuffer{limit: maxOutput}
-	cmd.Stdout = &output
-	if err := cmd.Run(); err != nil {
+	if err := e.run(ctx, name, args, stdin, &output); err != nil {
 		return nil, err
 	}
 	if output.exceeded {
 		return nil, ErrOutputLimit
 	}
 	return output.Bytes(), nil
+}
+
+func (e OSExecutor) RunDiscard(ctx context.Context, name string, args []string, stdin []byte) error {
+	return e.run(ctx, name, args, stdin, io.Discard)
+}
+
+func (e OSExecutor) run(ctx context.Context, name string, args []string, stdin []byte, stdout io.Writer) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	e.setEnv(cmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }
+	cmd.Stdin = bytes.NewReader(stdin)
+	cmd.Stdout = stdout
+	return cmd.Run()
 }
 
 func (e OSExecutor) Start(ctx context.Context, name string, args []string) (Process, error) {
@@ -140,6 +153,16 @@ func RunLimited(ctx context.Context, executor Executor, name string, args []stri
 		return nil, ErrOutputLimit
 	}
 	return output, err
+}
+
+// RunDiscard executes a helper while discarding stdout for commands whose
+// output is not part of their contract.
+func RunDiscard(ctx context.Context, executor Executor, name string, args []string, stdin []byte) error {
+	if discard, ok := executor.(DiscardExecutor); ok {
+		return discard.RunDiscard(ctx, name, args, stdin)
+	}
+	_, err := executor.Run(ctx, name, args, stdin)
+	return err
 }
 
 // FilterEnvironment returns a copy without any assignment whose name is in

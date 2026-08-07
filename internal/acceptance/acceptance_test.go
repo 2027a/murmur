@@ -91,20 +91,15 @@ func TestAcceptance_MUR009_ProviderControlsAreFilteredOnlyForActiveInjection(t *
 	cfg.Sink.Mode = "paste"
 	cfg.Sink.ClipboardMode = "clean-only"
 	cfg.Sink.PasteShortcuts = []string{"ctrl+v"}
-	executor := &sysexec.FakeExecutor{RunFunc: func(_ context.Context, name string, args []string, _ []byte) ([]byte, error) {
-		if name == "wtype" && !reflect.DeepEqual(args, []string{"-"}) {
-			return nil, errors.New("shortcut failed")
-		}
-		return nil, nil
-	}}
+	executor := &sysexec.FakeExecutor{}
 	o := buildOrchestrator(t, cfg, buildFixture(t, time.Second), executor, nil, nil, false)
 	result, runErr := stopSession(t, o)
 	if runErr != nil || result.Result != session.Completed {
 		t.Fatalf("active result=%#v error=%v", result, runErr)
 	}
 	calls := executor.Calls()
-	if len(calls) != 3 || calls[0].Name != "wl-copy" || string(calls[0].Stdin) != safe ||
-		calls[1].Name != "wtype" || calls[2].Name != "wtype" || !reflect.DeepEqual(calls[2].Args, []string{"-"}) || string(calls[2].Stdin) != safe {
+	if len(calls) != 2 || calls[0].Name != "wl-copy" || string(calls[0].Stdin) != safe ||
+		calls[1].Name != "wtype" || !reflect.DeepEqual(calls[1].Args, []string{"-M", "ctrl", "v", "-m", "ctrl"}) {
 		t.Fatalf("active delivery calls=%#v", calls)
 	}
 

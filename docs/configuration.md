@@ -67,7 +67,7 @@ déterministe afin que toutes les commandes retrouvent la même session.
 | `sink.mode` | `paste` | `paste`, `type`, `clipboard`, `stdout`, `file`, `auto` |
 | `sink.auto_mode` | `paste` | choix explicite `paste` ou `type` lorsque `mode=auto` |
 | `sink.clipboard_mode` | `clean-only` | `raw-and-clean`, `clean-only`, `none`, `transient` |
-| `sink.paste_shortcuts` | cascade usuelle | liste ordonnée parmi `ctrl+shift+v`, `shift+insert`, `ctrl+v` |
+| `sink.paste_shortcuts` | liste usuelle | liste ordonnée parmi `ctrl+shift+v`, `shift+insert`, `ctrl+v`; seul le premier raccourci est émis |
 | `sink.type_newlines` | `space` | `space`, `marker`, `dangerous-keep`; ce dernier autorise explicitement les LF en injection active |
 | `sink.file` | vide | obligatoire pour le sink `file` |
 | `ui.mode` | `notify` | `osd`, `notify`, `none` |
@@ -84,7 +84,7 @@ déterministe afin que toutes les commandes retrouvent la même session.
 | `logging.session_max_files` | `3` | fichier actif inclus, de 1 à 100 |
 
 Le budget des commandes externes de livraison n'est pas configurable: chaque
-copie, clear, frappe ou cascade complète de collage est borné à 5 secondes. Une
+copie, clear, frappe ou tentative de collage est borné à 5 secondes. Une
 expiration tue et récolte le groupe de processus, puis produit
 `failed/sink_failed`. Il n'existe volontairement pas de clé `sink.timeout_*`:
 ce délai protège le cycle de vie de la session et ne constitue pas une policy
