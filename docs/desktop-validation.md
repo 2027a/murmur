@@ -129,9 +129,10 @@ pas depuis `go run` ni depuis un chemin du checkout.
 
 - [ ] `paste` colle une fois dans au moins une application GTK, une application
   Qt et un terminal Wayland.
-- [ ] La cascade configurée essaie les raccourcis dans l'ordre et s'arrête au
-  premier `wtype` réussi.
-- [ ] L'échec technique de tous les raccourcis déclenche la frappe de repli.
+- [ ] Avec des raccourcis configurés, `paste` émet uniquement le premier
+  raccourci via `wtype`.
+- [ ] L'échec technique de ce raccourci fait échouer la livraison sans frappe de
+  repli.
 - [ ] `paste` avec clipboard `none` frappe directement sans réutiliser un ancien
   presse-papiers.
 - [ ] `type` traite correctement ASCII, accents, ponctuation et texte long.

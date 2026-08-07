@@ -53,6 +53,11 @@ func (f *fakeExecutor) Run(_ context.Context, name string, args []string, stdin 
 	return nil, nil
 }
 
+func (f *fakeExecutor) RunDiscard(ctx context.Context, name string, args []string, stdin []byte) error {
+	_, err := f.Run(ctx, name, args, stdin)
+	return err
+}
+
 func TestModesRunExactCommands(t *testing.T) {
 	tests := []struct {
 		name string
