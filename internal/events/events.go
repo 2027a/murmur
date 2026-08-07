@@ -64,8 +64,12 @@ func (e Event) Validate() error {
 		return fmt.Errorf("index partiel invalide")
 	}
 	switch e.Type {
-	case SessionStarted, CaptureReady, StateChanged:
+	case SessionStarted, CaptureReady:
 		if e.State == "" || e.Result != "" || e.Provider != "" || e.ErrorClass != "" || e.Component != "" || e.Partial != 0 || e.Total != 0 {
+			return fmt.Errorf("événement d'état incohérent")
+		}
+	case StateChanged:
+		if e.State == "" || e.Result != "" || e.ErrorClass != "" || e.Component != "" || e.Partial != 0 || e.Total != 0 {
 			return fmt.Errorf("événement d'état incohérent")
 		}
 	case PartialStarted, PartialDone:
