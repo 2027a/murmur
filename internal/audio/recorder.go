@@ -46,6 +46,10 @@ func (f WavFile) Release() (string, error) {
 		return "", f.File.Close()
 	}
 	f.cleanup.once.Do(func() {
+		if f.cleanup.retention.Keep {
+			f.cleanup.diagnostic, f.cleanup.err = preserveValidatedOrRemove(f.File, f.cleanup.tempDir, f.cleanup.retention)
+			return
+		}
 		closeErr := f.File.Close()
 		f.cleanup.diagnostic, f.cleanup.err = preserveOrRemove(f.Path(), f.cleanup.tempDir, f.cleanup.retention)
 		f.cleanup.err = errors.Join(closeErr, f.cleanup.err)

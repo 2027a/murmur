@@ -52,6 +52,7 @@ func ValidateLiveOptions(options LiveOptions) error {
 // latest full segment so a short final tail can be merged without retranscribing.
 type GrowingSegmenter struct {
 	path           string
+	source         *os.File
 	outputDir      string
 	segmentSamples int64
 	minimumTail    int64
@@ -62,6 +63,17 @@ type GrowingSegmenter struct {
 }
 
 func NewGrowingSegmenter(path, outputDir string, options LiveOptions) (*GrowingSegmenter, error) {
+	return newGrowingSegmenter(nil, path, outputDir, options)
+}
+
+func NewGrowingSegmenterFromFile(source *os.File, path, outputDir string, options LiveOptions) (*GrowingSegmenter, error) {
+	if source == nil {
+		return nil, errs.New(errs.AudioFailed, "audio", "descripteur de capture live absent")
+	}
+	return newGrowingSegmenter(source, path, outputDir, options)
+}
+
+func newGrowingSegmenter(source *os.File, path, outputDir string, options LiveOptions) (*GrowingSegmenter, error) {
 	if err := ValidateLiveOptions(options); err != nil {
 		return nil, err
 	}
@@ -70,13 +82,13 @@ func NewGrowingSegmenter(path, outputDir string, options LiveOptions) (*GrowingS
 		return nil, errs.New(errs.ConfigInvalid, "audio", "la durée live est inférieure à un échantillon")
 	}
 	return &GrowingSegmenter{
-		path: path, outputDir: outputDir, segmentSamples: segmentSamples,
+		path: path, source: source, outputDir: outputDir, segmentSamples: segmentSamples,
 		minimumTail: liveDurationSamples(options.MinimumTail),
 	}, nil
 }
 
 func (s *GrowingSegmenter) Poll() ([]LiveSegment, error) {
-	snapshot, ok, err := wav.Snapshot(s.path)
+	snapshot, ok, err := s.snapshot()
 	if err != nil || !ok {
 		return nil, err
 	}
@@ -143,11 +155,22 @@ func (s *GrowingSegmenter) Finalize(final wav.File) ([]LiveSegment, error) {
 
 func (s *GrowingSegmenter) Close() error {
 	var result error
+	if s.source != nil {
+		result = errors.Join(result, s.source.Close())
+		s.source = nil
+	}
 	for _, file := range s.files {
 		result = errors.Join(result, file.Close())
 	}
 	s.files = nil
 	return result
+}
+
+func (s *GrowingSegmenter) snapshot() (wav.File, bool, error) {
+	if s.source != nil {
+		return wav.SnapshotOpen(s.source, s.path)
+	}
+	return wav.Snapshot(s.path)
 }
 
 func (s *GrowingSegmenter) segment(file wav.File) LiveSegment {
