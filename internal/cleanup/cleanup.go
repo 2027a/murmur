@@ -31,6 +31,7 @@ type Config struct {
 	APIKey          string
 	Timeout         time.Duration
 	AllowedZone     policy.Zone
+	AllowInsecure   bool
 	TrustedNetworks []netip.Prefix
 }
 
@@ -54,6 +55,9 @@ func NewOpenAICompatible(config Config) (*Client, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
 		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, errs.New(errs.ConfigInvalid, "cleanup", "base_url doit être une URL HTTP(S) absolue")
+	}
+	if config.AllowedZone == policy.Internet && parsed.Scheme != "https" && !config.AllowInsecure {
+		return nil, errs.New(errs.ConfigInvalid, "cleanup", "base_url doit utiliser HTTPS en zone internet, sauf allow_insecure=true")
 	}
 	if config.Timeout <= 0 {
 		return nil, errs.New(errs.ConfigInvalid, "cleanup", "timeout doit être strictement positif")
