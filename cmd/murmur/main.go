@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/signal"
@@ -21,25 +22,41 @@ type signalStdin struct {
 	cancelled atomic.Bool
 }
 
-func (s *signalStdin) Read(buffer []byte) (int, error) {
-	n, err := s.file.Read(buffer)
-	if s.cancelled.Load() && err != nil {
-		return n, io.EOF
+func newSignalStdin(file *os.File) (*signalStdin, error) {
+	if err := syscall.SetNonblock(int(file.Fd()), true); err != nil {
+		return nil, err
 	}
-	return n, err
+	return &signalStdin{file: file}, nil
+}
+
+func (s *signalStdin) Read(buffer []byte) (int, error) {
+	for {
+		if s.cancelled.Load() {
+			return 0, io.EOF
+		}
+		n, err := syscall.Read(int(s.file.Fd()), buffer)
+		if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return n, err
+	}
 }
 
 func (s *signalStdin) CancelRead() error {
 	s.cancelled.Store(true)
-	if err := s.file.SetReadDeadline(time.Now()); err == nil {
-		return nil
-	}
-	return s.file.Close()
+	return nil
 }
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "dictate" {
-		stdin := &signalStdin{file: os.Stdin}
+		stdin, err := newSignalStdin(os.Stdin)
+		if err != nil {
+			os.Exit(1)
+		}
 		signals := make(chan os.Signal, 1)
 		signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer signal.Stop(signals)

@@ -15,7 +15,10 @@ func TestSignalStdinCancelReadTurnsBlockedPipeIntoEOF(t *testing.T) {
 	}
 	defer reader.Close()
 	defer writer.Close()
-	stdin := &signalStdin{file: reader}
+	stdin, err := newSignalStdin(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan error, 1)
 	go func() {
 		_, err := stdin.Read(make([]byte, 1))
