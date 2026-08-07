@@ -62,6 +62,7 @@ class MurmurOSD:
         self.success_timeout_ms = max(0, success_timeout_ms)
         self.error_timeout_ms = max(0, error_timeout_ms)
         self.input_buffer = b""
+        self.discarding_oversized_line = False
         self.hide_source = 0
         self.pulse_source = 0
         self.pulse_on = False
@@ -176,16 +177,38 @@ class MurmurOSD:
             return False
 
         if chunk:
-            self.input_buffer += chunk
-            if len(self.input_buffer) > MAX_INPUT_BUFFER:
-                self.input_buffer = b""
-            while b"\n" in self.input_buffer:
-                line, self.input_buffer = self.input_buffer.split(b"\n", 1)
-                self.apply_line(line)
+            self.ingest_input(chunk)
         if not chunk or condition & (GLib.IO_HUP | GLib.IO_ERR):
             self.finish_input()
             return False
         return True
+
+    def ingest_input(self, chunk: bytes) -> None:
+        self.input_buffer += chunk
+        while self.input_buffer:
+            if self.discarding_oversized_line:
+                newline = self.input_buffer.find(b"\n")
+                if newline < 0:
+                    self.input_buffer = b""
+                    return
+                self.input_buffer = self.input_buffer[newline + 1 :]
+                self.discarding_oversized_line = False
+                continue
+
+            newline = self.input_buffer.find(b"\n")
+            if newline >= 0:
+                line, self.input_buffer = (
+                    self.input_buffer[:newline],
+                    self.input_buffer[newline + 1 :],
+                )
+                if len(line) <= MAX_INPUT_BUFFER:
+                    self.apply_line(line)
+                continue
+
+            if len(self.input_buffer) > MAX_INPUT_BUFFER:
+                self.input_buffer = b""
+                self.discarding_oversized_line = True
+            return
 
     def finish_input(self) -> None:
         self.input_closed = True

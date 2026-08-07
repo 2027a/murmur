@@ -1095,6 +1095,8 @@ func (c *sessionNotificationClient) Notify(ctx context.Context, _ uint32, notifi
 	}
 }
 
+func (c *sessionNotificationClient) CloseNotification(context.Context, uint32) error { return nil }
+
 func (c *sessionNotificationClient) Close() error {
 	c.closeOnce.Do(func() { close(c.closed) })
 	return nil

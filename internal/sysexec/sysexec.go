@@ -14,6 +14,7 @@ import (
 )
 
 type Process interface {
+	Stdin() io.WriteCloser
 	Signal(os.Signal) error
 	Wait() error
 	Kill() error
@@ -21,7 +22,6 @@ type Process interface {
 
 type InputProcess interface {
 	Process
-	Stdin() io.WriteCloser
 }
 
 type Executor interface {
@@ -232,9 +232,6 @@ func (p *osProcess) Wait() error {
 func (p *osProcess) Kill() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.exited {
-		return os.ErrProcessDone
-	}
 	return killProcessGroup(p.cmd.Process)
 }
 
