@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"git.2027a.net/mathieu/murmur/internal/errs"
@@ -119,7 +120,7 @@ func Validate(cfg Config) error {
 		return err
 	}
 	if cfg.Plugin.Enabled && !contains(cfg.Policy.PluginZones, "local") {
-		return configError("le plugin sélectionné utilise la zone local, interdite par policy.plugin_zones")
+		return policyError("le plugin sélectionné utilise la zone local, interdite par policy.plugin_zones")
 	}
 	for _, prefix := range cfg.Policy.TrustedNetworks {
 		if _, err := netip.ParsePrefix(prefix); err != nil {
@@ -127,25 +128,23 @@ func Validate(cfg Config) error {
 		}
 	}
 
-	primary, ok := cfg.STT.Providers[cfg.STT.Provider]
-	if !ok || cfg.STT.Provider == "" {
+	if _, ok := cfg.STT.Providers[cfg.STT.Provider]; !ok || cfg.STT.Provider == "" {
 		return configError(fmt.Sprintf("stt.provider référence une entrée absente: %q", cfg.STT.Provider))
-	}
-	if err := validateProvider("stt.providers."+cfg.STT.Provider, primary); err != nil {
-		return err
 	}
 	if cfg.STT.Fallback != "" {
 		if cfg.STT.Fallback == cfg.STT.Provider {
 			return configError("stt.fallback doit être distinct de stt.provider")
 		}
-		fallback, ok := cfg.STT.Providers[cfg.STT.Fallback]
-		if !ok {
+		if _, ok := cfg.STT.Providers[cfg.STT.Fallback]; !ok {
 			return configError(fmt.Sprintf("stt.fallback référence une entrée absente: %q", cfg.STT.Fallback))
 		}
-		if err := validateProvider("stt.providers."+cfg.STT.Fallback, fallback); err != nil {
+	}
+	for _, name := range orderedProviderNames(cfg.STT.Providers, cfg.STT.Provider, cfg.STT.Fallback) {
+		if err := validateProvider("stt.providers."+name, cfg.STT.Providers[name]); err != nil {
 			return err
 		}
 	}
+	primary := cfg.STT.Providers[cfg.STT.Provider]
 	if cfg.General.CommandPack == "auto" {
 		primaryLanguage := commandLanguage(primary.Language)
 		if !oneOf(primaryLanguage, "fr", "en") {
@@ -158,11 +157,6 @@ func Validate(cfg Config) error {
 			}
 		}
 	}
-	for name, provider := range cfg.STT.Providers {
-		if err := validateProvider("stt.providers."+name, provider); err != nil {
-			return err
-		}
-	}
 
 	if cfg.Cleanup.Enabled && cfg.Cleanup.Provider == "" {
 		return configError("cleanup.provider est obligatoire lorsque cleanup.enabled vaut true")
@@ -173,8 +167,8 @@ func Validate(cfg Config) error {
 			return configError(fmt.Sprintf("cleanup.provider référence une entrée absente: %q", cfg.Cleanup.Provider))
 		}
 	}
-	for name, provider := range cfg.Cleanup.Providers {
-		if err := validateCleanupProvider("cleanup.providers."+name, provider); err != nil {
+	for _, name := range orderedProviderNames(cfg.Cleanup.Providers, cfg.Cleanup.Provider) {
+		if err := validateCleanupProvider("cleanup.providers."+name, cfg.Cleanup.Providers[name]); err != nil {
 			return err
 		}
 	}
@@ -291,6 +285,28 @@ func validateZoneList(path string, zones []string) error {
 		}
 	}
 	return nil
+}
+
+func orderedProviderNames[T any](providers map[string]T, preferred ...string) []string {
+	names := make([]string, 0, len(providers))
+	seen := make(map[string]bool, len(providers))
+	for _, name := range preferred {
+		if name == "" || seen[name] {
+			continue
+		}
+		if _, ok := providers[name]; ok {
+			names = append(names, name)
+			seen[name] = true
+		}
+	}
+	remaining := make([]string, 0, len(providers)-len(names))
+	for name := range providers {
+		if !seen[name] {
+			remaining = append(remaining, name)
+		}
+	}
+	sort.Strings(remaining)
+	return append(names, remaining...)
 }
 
 func secretSourceCount(provider CredentialConfig) int {

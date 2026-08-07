@@ -63,6 +63,20 @@ func TestBuildProcessorPreservesCleanupHTTP503Class(t *testing.T) {
 	}
 }
 
+func TestBuildCleanupPropagatesAllowInsecure(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Cleanup.Enabled = true
+	cfg.Cleanup.Provider = "cleanup"
+	cfg.Cleanup.Providers["cleanup"] = config.CleanupProviderConfig{
+		Type: "openai-compatible", BaseURL: "http://example.com/v1", Model: "test", TimeoutS: 1, Zone: "internet",
+		AllowInsecure: true,
+	}
+	cfg.Policy.CleanupZones = []string{"internet"}
+	if _, err := BuildCleanup(context.Background(), cfg, BuildOptions{}); err != nil {
+		t.Fatalf("BuildCleanup() error = %v", err)
+	}
+}
+
 func TestBuildTranscriberRejectsCrossOriginHealthBeforeProviderBuild(t *testing.T) {
 	cfg := config.Defaults()
 	provider := cfg.STT.Providers[cfg.STT.Provider]
