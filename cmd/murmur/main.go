@@ -42,6 +42,9 @@ func (s *signalStdin) Read(buffer []byte) (int, error) {
 		if errors.Is(err, syscall.EINTR) {
 			continue
 		}
+		if n == 0 && err == nil {
+			return 0, io.EOF
+		}
 		return n, err
 	}
 }

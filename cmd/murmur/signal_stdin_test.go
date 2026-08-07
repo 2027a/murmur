@@ -8,6 +8,24 @@ import (
 	"time"
 )
 
+func TestSignalStdinReturnsEOFWhenPipeCloses(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	stdin, err := newSignalStdin(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdin.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("Read() error=%v", err)
+	}
+}
+
 func TestSignalStdinCancelReadTurnsBlockedPipeIntoEOF(t *testing.T) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
