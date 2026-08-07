@@ -107,6 +107,7 @@ func BuildProcessor(ctx context.Context, cfg config.Config, options BuildOptions
 		CleanupProvider: cfg.Cleanup.Provider,
 		Cleanup:         cleaner,
 		Plugin:          grammar,
+		MaxTextBytes:    cfg.STT.MaxTextBytes,
 	})
 }
 
@@ -134,14 +135,9 @@ func BuildPlugin(cfg config.Config) (textpipe.Plugin, error) {
 		}
 		zones[i] = zone
 	}
-	trusted, err := trustedNetworks(cfg.Policy.TrustedNetworks)
-	if err != nil {
-		return nil, err
-	}
 	return plugin.New(implementation, plugin.Options{
-		Timeout:         time.Duration(cfg.Plugin.TimeoutS) * time.Second,
-		AllowedZones:    zones,
-		TrustedNetworks: trusted,
+		Timeout:      time.Duration(cfg.Plugin.TimeoutS) * time.Second,
+		AllowedZones: zones,
 	})
 }
 

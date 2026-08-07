@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -89,14 +88,6 @@ func TestOSExecutorRunDiscardDoesNotBufferStdout(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-
-func TestFilterEnvironmentRemovesEverySecretAssignment(t *testing.T) {
-	filtered := FilterEnvironment([]string{"TOKEN=one", "SAFE=yes", "TOKEN=two", "OTHER=x"}, []string{"TOKEN", "OTHER"})
-	if got := strings.Join(filtered, "|"); got != "SAFE=yes" {
-		t.Fatalf("filtered environment = %q", got)
-	}
-}
-
 func TestOSExecutorCancellationKillsProcessGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p, err := (OSExecutor{}).Start(ctx, "sh", []string{"-c", "sleep 30 & wait"})

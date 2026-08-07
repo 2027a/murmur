@@ -21,25 +21,16 @@ type Warning struct {
 const (
 	warningCleanupDegraded = "cleanup dégradé: texte précédent conservé"
 	warningCleanupInvalid  = "cleanup dégradé: sortie invalide rejetée"
+	warningCleanupBudget   = "cleanup dégradé: sortie supérieure au budget texte rejetée"
 	warningPluginDegraded  = "plugin dégradé: texte précédent conservé"
 	warningPluginInvalid   = "plugin dégradé: sortie invalide rejetée"
+	warningPluginBudget    = "plugin dégradé: sortie supérieure au budget texte rejetée"
+	defaultMaxTextBytes    = 16 << 20
 )
 
 type Result struct {
 	Text     string    `json:"text"`
 	Warnings []Warning `json:"warnings,omitempty"`
-}
-
-// Text and Warning are the generic contract for optional future pipeline stages.
-type Text struct {
-	Content    string
-	Protection Protection
-	Warnings   []Warning
-}
-
-type Stage interface {
-	Name() string
-	Apply(context.Context, Text) (Text, error)
 }
 
 type Cleanup interface {
@@ -62,6 +53,7 @@ type Options struct {
 	CleanupProvider string
 	Cleanup         Cleanup
 	Plugin          Plugin
+	MaxTextBytes    int
 }
 
 type Pipeline struct {
@@ -71,9 +63,16 @@ type Pipeline struct {
 	cleanup         Cleanup
 	plugin          Plugin
 	protector       *Protector
+	maxTextBytes    int
 }
 
 func New(options Options) (*Pipeline, error) {
+	if options.MaxTextBytes < 0 {
+		return nil, errs.New(errs.ConfigInvalid, "textpipe", "budget texte invalide")
+	}
+	if options.MaxTextBytes == 0 {
+		options.MaxTextBytes = defaultMaxTextBytes
+	}
 	pack, err := LoadPack(options.CommandPack, options.STTLanguage)
 	if err != nil {
 		return nil, err
@@ -85,6 +84,7 @@ func New(options Options) (*Pipeline, error) {
 		cleanup:         options.Cleanup,
 		plugin:          options.Plugin,
 		protector:       NewProtector(rand.Reader),
+		maxTextBytes:    options.MaxTextBytes,
 	}, nil
 }
 
@@ -97,9 +97,15 @@ func (p *Pipeline) Run(ctx context.Context, transcript string) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	if err := p.requireBudget(transcript, "transcription"); err != nil {
+		return Result{}, err
+	}
 	protected, err := p.protector.Protect(transcript, p.pack)
 	if err != nil {
 		return Result{}, fmt.Errorf("protect voice commands: %w", err)
+	}
+	if err := p.requireBudget(protected.Text, "protection des commandes vocales"); err != nil {
+		return Result{}, err
 	}
 
 	candidate := protected.Text
@@ -109,20 +115,15 @@ func (p *Pipeline) Run(ctx context.Context, transcript string) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		switch {
-		case cleanupErr != nil:
-			warnings = append(warnings, Warning{
-				Class: errs.Classify(cleanupErr), Provider: p.cleanupProvider, Component: "cleanup", Message: warningCleanupDegraded,
-			})
-		case candidate != "" && strings.TrimSpace(cleaned) == "":
-			warnings = append(warnings, Warning{
-				Class: errs.EmptyResponse, Provider: p.cleanupProvider, Component: "cleanup", Message: warningCleanupInvalid,
-			})
-		case protected.Protection.Validate(cleaned) != nil:
-			warnings = append(warnings, Warning{
-				Class: errs.EmptyResponse, Provider: p.cleanupProvider, Component: "cleanup", Message: warningCleanupInvalid,
-			})
-		default:
+		if warning, ok := optionalWarning(cleanupErr, "cleanup", warningCleanupDegraded); ok {
+			warning.Provider = p.cleanupProvider
+			warnings = append(warnings, warning)
+		} else if len(cleaned) > p.maxTextBytes {
+			warnings = append(warnings, Warning{Class: errs.ServerError, Provider: p.cleanupProvider, Component: "cleanup", Message: warningCleanupBudget})
+		} else if warning, ok := validateOptionalText(cleaned, candidate, protected.Protection, true, "cleanup", warningCleanupInvalid); ok {
+			warning.Provider = p.cleanupProvider
+			warnings = append(warnings, warning)
+		} else {
 			candidate = cleaned
 		}
 	}
@@ -131,22 +132,53 @@ func (p *Pipeline) Run(ctx context.Context, transcript string) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("render voice commands: %w", err)
 	}
+	if err := p.requireBudget(rendered, "rendu des commandes vocales"); err != nil {
+		return Result{}, err
+	}
 	final := rendered
 	if p.plugin != nil {
 		transformed, pluginErr := p.plugin.Transform(ctx, rendered)
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		switch {
-		case pluginErr != nil:
-			warnings = append(warnings, Warning{Class: errs.Classify(pluginErr), Component: "plugin", Message: warningPluginDegraded})
-		case rendered != "" && strings.TrimSpace(transformed) == "":
-			warnings = append(warnings, Warning{Class: errs.EmptyResponse, Component: "plugin", Message: warningPluginInvalid})
-		case strings.Contains(transformed, protected.Protection.Namespace):
-			warnings = append(warnings, Warning{Class: errs.EmptyResponse, Component: "plugin", Message: warningPluginInvalid})
-		default:
+		if warning, ok := optionalWarning(pluginErr, "plugin", warningPluginDegraded); ok {
+			warnings = append(warnings, warning)
+		} else if len(transformed) > p.maxTextBytes {
+			warnings = append(warnings, Warning{Class: errs.ServerError, Component: "plugin", Message: warningPluginBudget})
+		} else if warning, ok := validateOptionalText(transformed, rendered, protected.Protection, false, "plugin", warningPluginInvalid); ok {
+			warnings = append(warnings, warning)
+		} else {
 			final = transformed
 		}
 	}
 	return Result{Text: final, Warnings: warnings}, nil
+}
+
+func (p *Pipeline) requireBudget(text, stage string) error {
+	if len(text) > p.maxTextBytes {
+		return errs.New(errs.ServerError, "textpipe", stage+" supérieure au budget texte configuré")
+	}
+	return nil
+}
+
+func optionalWarning(err error, component, degraded string) (Warning, bool) {
+	if err == nil {
+		return Warning{}, false
+	}
+	return Warning{Class: errs.Classify(err), Component: component, Message: degraded}, true
+}
+
+func validateOptionalText(candidate, previous string, protection Protection, requireProtectedCommands bool, component, message string) (Warning, bool) {
+	if previous != "" && strings.TrimSpace(candidate) == "" {
+		return Warning{Class: errs.EmptyResponse, Component: component, Message: message}, true
+	}
+	if !requireProtectedCommands && protection.Namespace != "" && strings.Contains(candidate, protection.Namespace) {
+		return Warning{Class: errs.EmptyResponse, Component: component, Message: message}, true
+	}
+	if requireProtectedCommands && protection.HasCommands() {
+		if err := protection.Validate(candidate); err != nil {
+			return Warning{Class: errs.EmptyResponse, Component: component, Message: message}, true
+		}
+	}
+	return Warning{}, false
 }

@@ -348,6 +348,53 @@ func TestOptionalStageWarningsPreserveTypedClassesWithoutSensitiveErrors(t *test
 	}
 }
 
+func TestPipelineBudgetFallsBackForOptionalExpansion(t *testing.T) {
+	tests := []struct {
+		name      string
+		options   Options
+		want      string
+		component string
+	}{
+		{
+			name: "cleanup", component: "cleanup", want: "ok",
+			options: Options{CommandPack: "fr", MaxTextBytes: 4, Cleanup: CleanupFunc(func(context.Context, string, Protection) (string, error) {
+				return "beaucoup trop long", nil
+			})},
+		},
+		{
+			name: "plugin", component: "plugin", want: "ok",
+			options: Options{CommandPack: "fr", MaxTextBytes: 4, Plugin: PluginFunc(func(context.Context, string) (string, error) {
+				return "beaucoup trop long", nil
+			})},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pipeline, err := New(test.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := pipeline.Run(context.Background(), "ok")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Text != test.want || len(result.Warnings) != 1 || result.Warnings[0].Component != test.component || result.Warnings[0].Class != errs.ServerError {
+				t.Fatalf("result=%#v", result)
+			}
+		})
+	}
+}
+
+func TestPipelineBudgetUsesUTF8Bytes(t *testing.T) {
+	pipeline, err := New(Options{CommandPack: "fr", MaxTextBytes: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pipeline.Run(context.Background(), "éé"); errs.Classify(err) != errs.ServerError {
+		t.Fatalf("class=%q err=%v", errs.Classify(err), err)
+	}
+}
+
 func TestPipelineHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

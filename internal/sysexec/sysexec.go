@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -46,8 +45,6 @@ type OSExecutor struct {
 	// process environment; a non-nil empty slice provides an empty environment.
 	Env []string
 }
-
-func New() Executor { return OSExecutor{} }
 
 func (e OSExecutor) Run(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error) {
 	var output limitedBuffer
@@ -163,26 +160,6 @@ func RunDiscard(ctx context.Context, executor Executor, name string, args []stri
 	}
 	_, err := executor.Run(ctx, name, args, stdin)
 	return err
-}
-
-// FilterEnvironment returns a copy without any assignment whose name is in
-// removed. It removes duplicate assignments too.
-func FilterEnvironment(environment, removed []string) []string {
-	blocked := make(map[string]struct{}, len(removed))
-	for _, name := range removed {
-		if name != "" {
-			blocked[name] = struct{}{}
-		}
-	}
-	filtered := make([]string, 0, len(environment))
-	for _, assignment := range environment {
-		name, _, _ := strings.Cut(assignment, "=")
-		if _, remove := blocked[name]; remove {
-			continue
-		}
-		filtered = append(filtered, assignment)
-	}
-	return filtered
 }
 
 type osProcess struct {

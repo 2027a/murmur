@@ -80,9 +80,9 @@ func New(cfg config.Config, options Options) (Sink, error) {
 			return nil, errs.New(errs.ConfigInvalid, "sink", "clipboard transient incompatible avec paste: wtype ne confirme pas la consommation du collage")
 		}
 		if mode == Type || clipboardMode == clipboard.None {
-			target = sinkFunc(injector.Type)
+			target = sinkFunc(injector.TypeSanitized)
 		} else {
-			target = sinkFunc(injector.Paste)
+			target = sinkFunc(injector.PasteSanitized)
 		}
 	case Clipboard:
 		target = sinkFunc(func(context.Context, string) error { return nil })
@@ -103,7 +103,7 @@ func New(cfg config.Config, options Options) (Sink, error) {
 
 	delivery := Sink(&clipboardSink{clipboard: board, target: target})
 	if mode == Paste || mode == Type {
-		delivery = &activeTextSink{target: delivery, newlines: activeNewlines}
+		delivery = &activeTextSink{target: delivery, newlines: activeNewlines, maxTextBytes: cfg.STT.MaxTextBytes}
 	}
 	return delivery, nil
 }
@@ -145,8 +145,13 @@ type clipboardSink struct {
 }
 
 type activeTextSink struct {
-	target   Sink
-	newlines inject.NewlineMode
+	target       Sink
+	newlines     inject.NewlineMode
+	maxTextBytes int
+}
+
+func (s *activeTextSink) sanitize(text string) (string, error) {
+	return inject.SanitizeTextBounded(text, s.newlines, s.maxTextBytes)
 }
 
 func (s *activeTextSink) CopyRaw(ctx context.Context, text string) error {
@@ -156,11 +161,19 @@ func (s *activeTextSink) CopyRaw(ctx context.Context, text string) error {
 	if !ok {
 		return nil
 	}
-	return target.CopyRaw(ctx, inject.SanitizeText(text, s.newlines))
+	sanitized, err := s.sanitize(text)
+	if err != nil {
+		return err
+	}
+	return target.CopyRaw(ctx, sanitized)
 }
 
 func (s *activeTextSink) Deliver(ctx context.Context, text string) error {
-	return s.target.Deliver(ctx, inject.SanitizeText(text, s.newlines))
+	sanitized, err := s.sanitize(text)
+	if err != nil {
+		return err
+	}
+	return s.target.Deliver(ctx, sanitized)
 }
 
 func (s *clipboardSink) CopyRaw(ctx context.Context, text string) error {

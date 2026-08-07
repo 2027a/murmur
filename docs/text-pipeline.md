@@ -73,9 +73,8 @@ pipe, err := textpipe.New(textpipe.Options{
 Le plugin concret, son timeout et sa zone de confiance sont décrits dans
 [`markdown.md`](markdown.md). `textpipe` ne connaît que l'opération runtime texte
 vers texte et traite toute erreur comme récupérable. En amont, le runtime
-`internal/plugin` accepte une implémentation `Local` simple, mais exige le
-contrat `External` à capability HTTP netguard pour toute zone `lan` ou
-`internet`; une déclaration de zone seule ne donne aucun transport.
+`internal/plugin` accepte uniquement une implémentation `Local`; toute zone
+`lan` ou `internet` est rejetée.
 
 Les tests normatifs sont dans `internal/textpipe/testdata/golden.json`. Ils
 reprennent les cas utiles du pipeline historique et ajoutent le scénario anglais

@@ -55,6 +55,23 @@ func sinkConfig(mode, clipboardMode string) config.Config {
 	return cfg
 }
 
+func TestActiveSinkRejectsSanitizedExpansionBeforeEffects(t *testing.T) {
+	executor := &fakeExecutor{}
+	cfg := sinkConfig("type", "none")
+	cfg.Sink.TypeNewlines = "marker"
+	cfg.STT.MaxTextBytes = 4
+	delivery, err := New(cfg, Options{Executor: executor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := delivery.Deliver(context.Background(), "\n"); errs.Classify(err) != errs.ServerError {
+		t.Fatalf("class=%q err=%v", errs.Classify(err), err)
+	}
+	if len(executor.calls) != 0 {
+		t.Fatalf("external calls=%#v", executor.calls)
+	}
+}
+
 func TestPasteSinkCommandSequence(t *testing.T) {
 	executor := &fakeExecutor{}
 	delivery, err := New(sinkConfig("paste", "clean-only"), Options{Executor: executor})

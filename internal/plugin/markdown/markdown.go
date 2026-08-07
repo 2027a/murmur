@@ -12,6 +12,12 @@ import (
 	"git.2027a.net/mathieu/murmur/internal/policy"
 )
 
+const (
+	maxDocumentSegments = 4096
+	maxListItems        = 4096
+	maxOutputBytes      = 16 << 20
+)
+
 type Kind string
 
 const (
@@ -39,15 +45,18 @@ type Plugin struct{}
 func (Plugin) Name() string      { return "markdown" }
 func (Plugin) Zone() policy.Zone { return policy.Local }
 
-func (Plugin) Transform(_ context.Context, text string) (string, error) {
+func (Plugin) Transform(ctx context.Context, text string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if !triggerRE.MatchString(text) {
 		return text, nil
 	}
-	document, err := Parse(text)
+	document, err := parse(ctx, text)
 	if err != nil {
 		return "", errs.Wrap(errs.Internal, "plugin/markdown", "commande Markdown invalide", err)
 	}
-	rendered, err := document.Render()
+	rendered, err := document.render(ctx)
 	if err != nil {
 		return "", errs.Wrap(errs.Internal, "plugin/markdown", "document Markdown invalide", err)
 	}
@@ -71,9 +80,16 @@ var (
 )
 
 func Parse(source string) (Document, error) {
+	return parse(context.Background(), source)
+}
+
+func parse(ctx context.Context, source string) (Document, error) {
 	var document Document
 	position := 0
 	for position < len(source) {
+		if err := ctx.Err(); err != nil {
+			return Document{}, err
+		}
 		location := triggerRE.FindStringIndex(source[position:])
 		if location == nil {
 			appendText(&document, source[position:])
@@ -87,6 +103,9 @@ func Parse(source string) (Document, error) {
 			return Document{}, err
 		}
 		document.Segments = append(document.Segments, segment)
+		if len(document.Segments) > maxDocumentSegments {
+			return Document{}, errors.New("document Markdown trop structuré")
+		}
 		position = next
 	}
 	if len(document.Segments) == 0 {
@@ -163,6 +182,9 @@ func parseList(source string, contentStart int, kind Kind) (Segment, int, error)
 	}
 	if len(markers) == 0 || strings.Trim(strings.TrimSpace(body[:markers[0].start]), ",;:") != "" {
 		return Segment{}, 0, errors.New("liste sans marqueur item initial")
+	}
+	if len(markers) > maxListItems {
+		return Segment{}, 0, errors.New("liste trop longue")
 	}
 	items := make([]string, 0, len(markers))
 	for i, marker := range markers {
@@ -304,6 +326,9 @@ func (document Document) Validate() error {
 	if len(document.Segments) == 0 {
 		return errors.New("document sans segments")
 	}
+	if len(document.Segments) > maxDocumentSegments {
+		return errors.New("document Markdown trop structuré")
+	}
 	for _, segment := range document.Segments {
 		switch segment.Kind {
 		case Text:
@@ -330,6 +355,9 @@ func (document Document) Validate() error {
 		case OrderedList, BulletList:
 			if segment.Level != 0 || segment.Text != "" || len(segment.Items) == 0 {
 				return errors.New("liste mal formée")
+			}
+			if len(segment.Items) > maxListItems {
+				return errors.New("liste trop longue")
 			}
 			for _, item := range segment.Items {
 				if err := validateContent(item, false); err != nil {
@@ -361,61 +389,154 @@ func validateContent(text string, allowEmpty bool) error {
 }
 
 func (document Document) Render() (string, error) {
+	return document.render(context.Background())
+}
+
+func (document Document) render(ctx context.Context) (string, error) {
 	if err := document.Validate(); err != nil {
 		return "", err
 	}
-	var output string
+	var output boundedBuilder
 	afterBlock := false
 	for _, segment := range document.Segments {
-		fragment, block := renderSegment(segment)
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		block := segment.Kind == Heading || segment.Kind == OrderedList || segment.Kind == BulletList
 		if block {
-			output = strings.TrimRight(output, " \t\r\n")
-			if output != "" {
-				output += "\n\n"
+			output.TrimRight(" \t\r\n")
+			if output.Len() != 0 {
+				if err := output.WriteString("\n\n"); err != nil {
+					return "", err
+				}
 			}
-			output += fragment + "\n\n"
+			if err := renderSegment(ctx, &output, segment); err != nil {
+				return "", err
+			}
+			if err := output.WriteString("\n\n"); err != nil {
+				return "", err
+			}
 			afterBlock = true
 			continue
+		}
+		fragment := segment.Text
+		if segment.Kind == Bold {
+			fragment = "**" + segment.Text + "**"
+		} else if segment.Kind == Italic {
+			fragment = "*" + segment.Text + "*"
 		}
 		if afterBlock {
 			fragment = strings.TrimLeft(fragment, " \t\r\n")
 		}
-		output += fragment
+		if err := output.WriteString(fragment); err != nil {
+			return "", err
+		}
 		afterBlock = false
 	}
-	output = strings.TrimSpace(output)
-	if output == "" {
+	result := strings.TrimSpace(output.String())
+	if result == "" {
 		return "", errors.New("rendu vide")
 	}
-	if triggerRE.MatchString(output) || strings.Contains(strings.ToLower(output), "[[murmur_cmd:") {
+	if triggerRE.MatchString(result) || strings.Contains(strings.ToLower(result), "[[murmur_cmd:") {
 		return "", errors.New("commande ou token présent dans le rendu")
 	}
-	return output, nil
+	return result, nil
 }
 
-func renderSegment(segment Segment) (string, bool) {
+func renderSegment(ctx context.Context, output *boundedBuilder, segment Segment) error {
 	switch segment.Kind {
 	case Text:
-		return segment.Text, false
+		return output.WriteString(segment.Text)
 	case Heading:
-		return strings.Repeat("#", segment.Level) + " " + segment.Text, true
+		if err := output.WriteString(strings.Repeat("#", segment.Level)); err != nil {
+			return err
+		}
+		if err := output.WriteString(" "); err != nil {
+			return err
+		}
+		return output.WriteString(segment.Text)
 	case Bold:
-		return "**" + segment.Text + "**", false
+		if err := output.WriteString("**"); err != nil {
+			return err
+		}
+		if err := output.WriteString(segment.Text); err != nil {
+			return err
+		}
+		return output.WriteString("**")
 	case Italic:
-		return "*" + segment.Text + "*", false
+		if err := output.WriteString("*"); err != nil {
+			return err
+		}
+		if err := output.WriteString(segment.Text); err != nil {
+			return err
+		}
+		return output.WriteString("*")
 	case OrderedList:
-		lines := make([]string, len(segment.Items))
 		for i, item := range segment.Items {
-			lines[i] = strconv.Itoa(i+1) + ". " + item
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if i > 0 {
+				if err := output.WriteString("\n"); err != nil {
+					return err
+				}
+			}
+			if err := output.WriteString(strconv.Itoa(i + 1)); err != nil {
+				return err
+			}
+			if err := output.WriteString(". "); err != nil {
+				return err
+			}
+			if err := output.WriteString(item); err != nil {
+				return err
+			}
 		}
-		return strings.Join(lines, "\n"), true
+		return nil
 	case BulletList:
-		lines := make([]string, len(segment.Items))
 		for i, item := range segment.Items {
-			lines[i] = "- " + item
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if i > 0 {
+				if err := output.WriteString("\n"); err != nil {
+					return err
+				}
+			}
+			if err := output.WriteString("- "); err != nil {
+				return err
+			}
+			if err := output.WriteString(item); err != nil {
+				return err
+			}
 		}
-		return strings.Join(lines, "\n"), true
+		return nil
 	default:
-		return "", false
+		return errors.New("type de segment inconnu")
+	}
+}
+
+type boundedBuilder struct {
+	data  []byte
+	limit int
+}
+
+func (b *boundedBuilder) Len() int { return len(b.data) }
+
+func (b *boundedBuilder) String() string { return string(b.data) }
+
+func (b *boundedBuilder) WriteString(text string) error {
+	if b.limit == 0 {
+		b.limit = maxOutputBytes
+	}
+	if len(text) > b.limit-len(b.data) {
+		return errors.New("rendu Markdown trop volumineux")
+	}
+	b.data = append(b.data, text...)
+	return nil
+}
+
+func (b *boundedBuilder) TrimRight(cutset string) {
+	for len(b.data) > 0 && strings.ContainsRune(cutset, rune(b.data[len(b.data)-1])) {
+		b.data = b.data[:len(b.data)-1]
 	}
 }
