@@ -3,11 +3,14 @@ package markdown
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"git.2027a.net/mathieu/murmur/internal/errs"
 	pluginruntime "git.2027a.net/mathieu/murmur/internal/plugin"
 	"git.2027a.net/mathieu/murmur/internal/policy"
 	"git.2027a.net/mathieu/murmur/internal/textpipe"
@@ -109,10 +112,62 @@ func TestDocumentValidationRejectsUnconsumedCommandsAndInvalidStructure(t *testi
 		{Segments: []Segment{{Kind: Text, Text: "commande stt titre 1 fuite"}}},
 		{Segments: []Segment{{Kind: BulletList, Items: []string{""}}}},
 		{Segments: []Segment{{Kind: Bold, Text: "[[MURMUR_CMD:token]]"}}},
+		{Segments: manyTextSegments(maxDocumentSegments + 1)},
+		{Segments: []Segment{{Kind: OrderedList, Items: numberedItems(maxListItems + 1)}}},
 	}
 	for _, document := range invalid {
 		if err := document.Validate(); err == nil {
 			t.Fatalf("Validate() accepted %#v", document)
 		}
 	}
+}
+
+func TestMarkdownRejectsOversizedOutputWithoutPartialText(t *testing.T) {
+	document := Document{Segments: []Segment{{Kind: Text, Text: strings.Repeat("a", maxOutputBytes+1)}}}
+	if got, err := document.Render(); err == nil || got != "" {
+		t.Fatalf("Render() = %q, %v; want empty output and error", got, err)
+	}
+}
+
+func TestMarkdownTransformHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err := (Plugin{}).Transform(ctx, "commande stt titre 1 texte fin du titre")
+	if !errors.Is(err, context.Canceled) || got != "" {
+		t.Fatalf("Transform() = %q, %v; want cancellation without output", got, err)
+	}
+}
+
+func TestMarkdownLimitFallsBackThroughPipelineWithoutPartialOutput(t *testing.T) {
+	text := "commande stt liste à puces " + strings.Repeat("item trop long ", maxListItems+1) + "fin de liste"
+	pipeline, err := textpipe.New(textpipe.Options{CommandPack: "fr", Plugin: Plugin{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := pipeline.Run(context.Background(), text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != text {
+		t.Fatalf("fallback text = %q, want original", result.Text)
+	}
+	if len(result.Warnings) != 1 || result.Warnings[0].Component != "plugin" || result.Warnings[0].Class != errs.Internal {
+		t.Fatalf("warnings = %#v", result.Warnings)
+	}
+}
+
+func manyTextSegments(count int) []Segment {
+	segments := make([]Segment, count)
+	for i := range segments {
+		segments[i] = Segment{Kind: Text, Text: strconv.Itoa(i)}
+	}
+	return segments
+}
+
+func numberedItems(count int) []string {
+	items := make([]string, count)
+	for i := range items {
+		items[i] = strconv.Itoa(i)
+	}
+	return items
 }

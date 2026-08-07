@@ -35,6 +35,7 @@ type Notification struct {
 
 type NotificationClient interface {
 	Notify(ctx context.Context, replacesID uint32, notification Notification) (uint32, error)
+	CloseNotification(ctx context.Context, id uint32) error
 	Close() error
 }
 
@@ -151,8 +152,18 @@ func (u *Notify) Close() {
 
 func (u *Notify) run() {
 	defer close(u.done)
-	defer u.client.Close()
 	var replacesID uint32
+	terminalAccepted := false
+	defer func() {
+		if replacesID != 0 && !terminalAccepted {
+			ctx, cancel := context.WithTimeout(context.Background(), u.callTimeout)
+			if err := u.client.CloseNotification(ctx, replacesID); err != nil {
+				warning(logging.ComponentDBus, u.warn, "retrait de la notification persistante échoué")
+			}
+			cancel()
+		}
+		_ = u.client.Close()
+	}()
 	for {
 		u.mu.Lock()
 		request := u.pending
@@ -186,6 +197,9 @@ func (u *Notify) run() {
 			continue
 		}
 		replacesID = id
+		if request.terminal {
+			terminalAccepted = true
+		}
 	}
 }
 
@@ -321,6 +335,13 @@ func (c *DBusNotificationClient) Notify(ctx context.Context, replacesID uint32, 
 		return 0, err
 	}
 	return id, nil
+}
+
+func (c *DBusNotificationClient) CloseNotification(ctx context.Context, id uint32) error {
+	if c == nil || c.obj == nil {
+		return fmt.Errorf("client D-Bus non initialise")
+	}
+	return c.obj.CallWithContext(ctx, "org.freedesktop.Notifications.CloseNotification", 0, id).Err
 }
 
 func (c *DBusNotificationClient) Close() error {

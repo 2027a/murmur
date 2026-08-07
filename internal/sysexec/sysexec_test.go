@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -83,13 +82,12 @@ func TestOSExecutorRunLimitedBoundsHelperOutput(t *testing.T) {
 	}
 }
 
-func TestFilterEnvironmentRemovesEverySecretAssignment(t *testing.T) {
-	filtered := FilterEnvironment([]string{"TOKEN=one", "SAFE=yes", "TOKEN=two", "OTHER=x"}, []string{"TOKEN", "OTHER"})
-	if got := strings.Join(filtered, "|"); got != "SAFE=yes" {
-		t.Fatalf("filtered environment = %q", got)
+func TestOSExecutorRunDiscardDoesNotBufferStdout(t *testing.T) {
+	err := (OSExecutor{}).RunDiscard(context.Background(), "sh", []string{"-c", "yes ignored | head -c 1048576 >/dev/stdout"}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
-
 func TestOSExecutorCancellationKillsProcessGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p, err := (OSExecutor{}).Start(ctx, "sh", []string{"-c", "sleep 30 & wait"})

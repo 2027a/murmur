@@ -80,7 +80,7 @@ func BuildCleanup(ctx context.Context, cfg config.Config, options BuildOptions) 
 	return cleanup.NewOpenAICompatible(cleanup.Config{
 		BaseURL: provider.BaseURL, Model: provider.Model, Prompt: cfg.Cleanup.Prompt,
 		APIKey: secret, Timeout: time.Duration(provider.TimeoutS) * time.Second,
-		AllowedZone: zone, TrustedNetworks: trusted,
+		AllowedZone: zone, AllowInsecure: provider.AllowInsecure, TrustedNetworks: trusted,
 	})
 }
 
@@ -101,11 +101,13 @@ func BuildProcessor(ctx context.Context, cfg config.Config, options BuildOptions
 		return nil, err
 	}
 	return textpipe.New(textpipe.Options{
-		CommandPack: cfg.General.CommandPack,
-		STTLanguage: cfg.STT.Providers[cfg.STT.Provider].Language,
-		ASCIIQuotes: cfg.General.ASCIIQuotes,
-		Cleanup:     cleaner,
-		Plugin:      grammar,
+		CommandPack:     cfg.General.CommandPack,
+		STTLanguage:     cfg.STT.Providers[cfg.STT.Provider].Language,
+		ASCIIQuotes:     cfg.General.ASCIIQuotes,
+		CleanupProvider: cfg.Cleanup.Provider,
+		Cleanup:         cleaner,
+		Plugin:          grammar,
+		MaxTextBytes:    cfg.STT.MaxTextBytes,
 	})
 }
 
@@ -133,14 +135,9 @@ func BuildPlugin(cfg config.Config) (textpipe.Plugin, error) {
 		}
 		zones[i] = zone
 	}
-	trusted, err := trustedNetworks(cfg.Policy.TrustedNetworks)
-	if err != nil {
-		return nil, err
-	}
 	return plugin.New(implementation, plugin.Options{
-		Timeout:         time.Duration(cfg.Plugin.TimeoutS) * time.Second,
-		AllowedZones:    zones,
-		TrustedNetworks: trusted,
+		Timeout:      time.Duration(cfg.Plugin.TimeoutS) * time.Second,
+		AllowedZones: zones,
 	})
 }
 

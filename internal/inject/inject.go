@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"git.2027a.net/mathieu/murmur/internal/delivery"
 	"git.2027a.net/mathieu/murmur/internal/errs"
@@ -48,33 +48,41 @@ func New(executor sysexec.Executor, shortcuts []string, newlines NewlineMode) (*
 
 // Type sends text to wtype's stdin after applying the newline policy.
 func (i *Injector) Type(ctx context.Context, text string) error {
+	text = SanitizeText(text, i.newlines)
+	return i.TypeSanitized(ctx, text)
+}
+
+// TypeSanitized sends already-sanitized text without transforming it again.
+func (i *Injector) TypeSanitized(ctx context.Context, text string) error {
 	commandCtx, cancel := context.WithTimeout(ctx, delivery.CommandTimeout)
 	defer cancel()
 	return i.typeText(commandCtx, text)
 }
 
 func (i *Injector) typeText(ctx context.Context, text string) error {
-	text = SanitizeText(text, i.newlines)
-	if _, err := i.executor.Run(ctx, "wtype", []string{"-"}, []byte(text)); err != nil {
+	if err := sysexec.RunDiscard(ctx, i.executor, "wtype", []string{"-"}, []byte(text)); err != nil {
 		return commandError(ctx, "frappe simulée impossible", err)
 	}
 	return nil
 }
 
-// Paste tries each configured shortcut and falls back to simulated typing only
-// when every shortcut command failed technically.
+// Paste performs a single active injection attempt: the first configured
+// shortcut, or direct typing when no shortcut is configured.
 func (i *Injector) Paste(ctx context.Context, text string) error {
+	return i.PasteSanitized(ctx, SanitizeText(text, i.newlines))
+}
+
+// PasteSanitized injects text that already passed the active-text policy.
+func (i *Injector) PasteSanitized(ctx context.Context, text string) error {
 	commandCtx, cancel := context.WithTimeout(ctx, delivery.CommandTimeout)
 	defer cancel()
-	for _, args := range i.shortcuts {
-		if _, err := i.executor.Run(commandCtx, "wtype", args, nil); err == nil {
-			return nil
-		}
-		if commandCtx.Err() != nil {
-			return commandError(commandCtx, "collage simulé impossible", commandCtx.Err())
-		}
+	if len(i.shortcuts) == 0 {
+		return i.typeText(commandCtx, text)
 	}
-	return i.typeText(commandCtx, text)
+	if err := sysexec.RunDiscard(commandCtx, i.executor, "wtype", i.shortcuts[0], nil); err != nil {
+		return commandError(commandCtx, "collage simulé impossible", err)
+	}
+	return nil
 }
 
 func commandError(ctx context.Context, message string, cause error) error {
@@ -101,27 +109,63 @@ func shortcutArgs(shortcut string) ([]string, bool) {
 // spaces, invalid UTF-8 becomes U+FFFD, and Unicode control characters are
 // removed except for explicitly opted-in line feeds.
 func SanitizeText(text string, mode NewlineMode) string {
-	text = strings.ToValidUTF8(text, "\uFFFD")
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	switch mode {
-	case Marker:
-		text = strings.ReplaceAll(text, "\n", newlineMarker)
-	case DangerousKeep:
-	default:
-		text = strings.ReplaceAll(text, "\n", " ")
+	result, _ := SanitizeTextBounded(text, mode, 0)
+	return result
+}
+
+// SanitizeTextBounded applies the active-text policy in one pass and refuses
+// output larger than maxBytes. A non-positive maxBytes disables the bound.
+func SanitizeTextBounded(text string, mode NewlineMode, maxBytes int) (string, error) {
+	if mode != Space && mode != Marker && mode != DangerousKeep {
+		return "", errs.New(errs.ConfigInvalid, "inject", "mode de retours à la ligne invalide")
 	}
-	return strings.Map(func(r rune) rune {
+	capacity := len(text)
+	if maxBytes > 0 && capacity > maxBytes {
+		capacity = maxBytes
+	}
+	output := make([]byte, 0, capacity)
+	appendValue := func(value string) error {
+		if maxBytes > 0 && len(output)+len(value) > maxBytes {
+			return errs.New(errs.ServerError, "inject", "texte sanitisé supérieur au budget configuré")
+		}
+		output = append(output, value...)
+		return nil
+	}
+	for offset := 0; offset < len(text); {
+		r, size := utf8.DecodeRuneInString(text[offset:])
+		if r == utf8.RuneError && size == 1 {
+			r = utf8.RuneError
+		}
+		offset += size
+		if r == '\r' {
+			if offset < len(text) && text[offset] == '\n' {
+				offset++
+			}
+			r = '\n'
+		}
 		switch r {
-		case '\t':
-			return ' '
+		case '	':
+			if err := appendValue(" "); err != nil {
+				return "", err
+			}
 		case '\n':
-			return r
+			value := " "
+			if mode == Marker {
+				value = newlineMarker
+			} else if mode == DangerousKeep {
+				value = "\n"
+			}
+			if err := appendValue(value); err != nil {
+				return "", err
+			}
 		default:
 			if unicode.IsControl(r) {
-				return -1
+				continue
 			}
-			return r
+			if err := appendValue(string(r)); err != nil {
+				return "", err
+			}
 		}
-	}, text)
+	}
+	return string(output), nil
 }

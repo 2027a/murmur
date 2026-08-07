@@ -70,6 +70,8 @@ def new_osd():
     osd = module.MurmurOSD.__new__(module.MurmurOSD)
     osd.success_timeout_ms = 17
     osd.error_timeout_ms = 29
+    osd.input_buffer = b""
+    osd.discarding_oversized_line = False
     osd.input_closed = False
     osd.terminal_received = False
     osd.hide_source = 0
@@ -109,6 +111,28 @@ class HelperShutdownTest(unittest.TestCase):
         osd = new_osd()
         osd.finish_input()
         self.assertEqual(FakeGtk.quit_calls, 1)
+
+    def test_oversized_line_resynchronizes_on_next_frame(self):
+        osd = new_osd()
+        osd.ingest_input(b"x" * (module.MAX_INPUT_BUFFER + 1))
+        self.assertFalse(osd.window.visible)
+        self.assertTrue(osd.discarding_oversized_line)
+
+        osd.ingest_input(b'\n{"v":1,"state":"recording","visible":true}\n')
+
+        self.assertTrue(osd.window.visible)
+        self.assertEqual(osd.label.text, "Ecoute")
+        self.assertFalse(osd.discarding_oversized_line)
+
+    def test_oversized_line_does_not_drop_following_frame_in_same_chunk(self):
+        osd = new_osd()
+        osd.ingest_input(
+            b"x" * (module.MAX_INPUT_BUFFER + 1)
+            + b'\n{"v":1,"state":"processing","visible":true}\n'
+        )
+
+        self.assertTrue(osd.window.visible)
+        self.assertEqual(osd.label.text, "Traitement")
 
 
 if __name__ == "__main__":

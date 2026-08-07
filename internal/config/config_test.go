@@ -816,6 +816,84 @@ func TestProviderPolicyViolationIsPolicyBlocked(t *testing.T) {
 	}
 }
 
+func TestValidateProvidersOnceInDeterministicOrder(t *testing.T) {
+	t.Run("primary before fallback and inactive", func(t *testing.T) {
+		testCfg := providerValidationConfig()
+		provider := testCfg.STT.Providers[testCfg.STT.Provider]
+		provider.Model = ""
+		testCfg.STT.Providers[testCfg.STT.Provider] = provider
+		provider = testCfg.STT.Providers["fallback"]
+		provider.Model = ""
+		testCfg.STT.Providers["fallback"] = provider
+		provider = testCfg.STT.Providers["aaa-invalid"]
+		provider.Model = ""
+		testCfg.STT.Providers["aaa-invalid"] = provider
+
+		err := Validate(testCfg)
+		if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), "stt.providers.local.model") {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("fallback before sorted inactive", func(t *testing.T) {
+		testCfg := providerValidationConfig()
+		provider := testCfg.STT.Providers["fallback"]
+		provider.Model = ""
+		testCfg.STT.Providers["fallback"] = provider
+		provider = testCfg.STT.Providers["aaa-invalid"]
+		provider.Model = ""
+		testCfg.STT.Providers["aaa-invalid"] = provider
+
+		err := Validate(testCfg)
+		if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), "stt.providers.fallback.model") {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("inactive sorted", func(t *testing.T) {
+		testCfg := providerValidationConfig()
+		provider := testCfg.STT.Providers["zzz-invalid"]
+		provider.Model = ""
+		testCfg.STT.Providers["zzz-invalid"] = provider
+		provider = testCfg.STT.Providers["aaa-invalid"]
+		provider.Model = ""
+		testCfg.STT.Providers["aaa-invalid"] = provider
+
+		err := Validate(testCfg)
+		if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), "stt.providers.aaa-invalid.model") {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+
+	t.Run("cleanup active before sorted inactive", func(t *testing.T) {
+		testCfg := Defaults()
+		provider := CleanupProviderConfig{Type: "openai-compatible", BaseURL: "http://127.0.0.1:8001/v1", Model: "cleaner", TimeoutS: 10, Zone: "local"}
+		testCfg.Cleanup.Enabled = true
+		testCfg.Cleanup.Provider = "cleanup"
+		testCfg.Cleanup.Providers["cleanup"] = provider
+		testCfg.Cleanup.Providers["aaa-invalid"] = provider
+		testCfg.Cleanup.Providers["zzz-invalid"] = provider
+		provider.Model = ""
+		testCfg.Cleanup.Providers["cleanup"] = provider
+		testCfg.Cleanup.Providers["aaa-invalid"] = provider
+
+		err := Validate(testCfg)
+		if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), "cleanup.providers.cleanup.model") {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	})
+}
+
+func providerValidationConfig() Config {
+	cfg := Defaults()
+	primary := cfg.STT.Providers[cfg.STT.Provider]
+	cfg.STT.Fallback = "fallback"
+	cfg.STT.Providers["fallback"] = primary
+	cfg.STT.Providers["aaa-invalid"] = primary
+	cfg.STT.Providers["zzz-invalid"] = primary
+	return cfg
+}
+
 func TestValidateClipboardOnly(t *testing.T) {
 	for _, mode := range []string{"none", "transient"} {
 		cfg := Defaults()

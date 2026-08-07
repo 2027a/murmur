@@ -82,10 +82,10 @@ func Build(options BuildOptions) (*Orchestrator, error) {
 		case "notify":
 			userInterface = ui.NewDesktopNotifications(nil)
 		case "osd":
-			closeTimeout := time.Duration(max(options.Config.UI.OSD.SuccessTimeoutMS, options.Config.UI.OSD.ErrorTimeoutMS))*time.Millisecond + ui.OSDHelperExitGrace
 			userInterface = ui.NewOSD(executor, ui.OSDOptions{
-				Helper:       options.Config.UI.OSD.Helper,
-				CloseTimeout: closeTimeout,
+				Helper:            options.Config.UI.OSD.Helper,
+				CloseTimeout:      time.Duration(options.Config.UI.OSD.SuccessTimeoutMS)*time.Millisecond + ui.OSDHelperExitGrace,
+				ErrorCloseTimeout: time.Duration(options.Config.UI.OSD.ErrorTimeoutMS)*time.Millisecond + ui.OSDHelperExitGrace,
 				Args: []string{
 					"--position", options.Config.UI.OSD.Position,
 					"--success-timeout-ms", strconv.Itoa(options.Config.UI.OSD.SuccessTimeoutMS),

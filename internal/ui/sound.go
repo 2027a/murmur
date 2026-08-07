@@ -10,7 +10,10 @@ import (
 	"git.2027a.net/mathieu/murmur/internal/sysexec"
 )
 
-const soundCloseTimeout = 2 * time.Second
+const (
+	soundPlaybackTimeout = 500 * time.Millisecond
+	soundCloseTimeout    = 2 * time.Second
+)
 
 type Sound struct {
 	next      UI
@@ -157,7 +160,10 @@ func (s *Sound) playOnce() bool {
 		{name: "canberra-gtk-play", args: []string{"-f", file}},
 	}
 	for _, command := range commands {
-		if _, err := s.executor.Run(s.ctx, command.name, command.args, nil); err == nil {
+		ctx, cancel := context.WithTimeout(s.ctx, soundPlaybackTimeout)
+		_, err := s.executor.Run(ctx, command.name, command.args, nil)
+		cancel()
+		if err == nil {
 			return true
 		}
 	}

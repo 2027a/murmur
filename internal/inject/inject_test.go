@@ -42,6 +42,11 @@ func (f *fakeExecutor) Run(_ context.Context, name string, args []string, stdin 
 	return nil, err
 }
 
+func (f *fakeExecutor) RunDiscard(ctx context.Context, name string, args []string, stdin []byte) error {
+	_, err := f.Run(ctx, name, args, stdin)
+	return err
+}
+
 func TestPasteShortcutArguments(t *testing.T) {
 	tests := []struct {
 		shortcut string
@@ -69,36 +74,33 @@ func TestPasteShortcutArguments(t *testing.T) {
 	}
 }
 
-func TestPasteCascadeStopsAtFirstSuccess(t *testing.T) {
-	executor := &fakeExecutor{results: []error{errors.New("unsupported"), nil}}
+func TestPasteUsesOnlyFirstShortcut(t *testing.T) {
+	failure := errors.New("unsupported")
+	executor := &fakeExecutor{results: []error{failure}}
 	injector, err := New(executor, []string{"ctrl+shift+v", "shift+insert", "ctrl+v"}, Space)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := injector.Paste(context.Background(), "unused"); err != nil {
-		t.Fatal(err)
+	if err := injector.Paste(context.Background(), "unused"); !errors.Is(err, failure) || errs.Classify(err) != errs.SinkFailed {
+		t.Fatalf("error = %v, class = %s", err, errs.Classify(err))
 	}
-	if len(executor.calls) != 2 || !reflect.DeepEqual(executor.calls[1].args, []string{"-M", "shift", "Insert", "-m", "shift"}) {
+	if len(executor.calls) != 1 || !reflect.DeepEqual(executor.calls[0].args, []string{"-M", "ctrl", "-M", "shift", "v", "-m", "shift", "-m", "ctrl"}) {
 		t.Fatalf("calls = %#v", executor.calls)
 	}
 }
 
-func TestPasteFallsBackToType(t *testing.T) {
-	failure := errors.New("wtype shortcut failed")
-	executor := &fakeExecutor{results: []error{failure, failure, failure, nil}}
-	injector, err := New(executor, []string{"ctrl+shift+v", "shift+insert", "ctrl+v"}, Space)
+func TestPasteWithoutShortcutTypesOnce(t *testing.T) {
+	executor := &fakeExecutor{}
+	injector, err := New(executor, nil, Space)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := injector.Paste(context.Background(), "one\ntwo"); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.calls) != 4 {
-		t.Fatalf("calls = %d, want 4", len(executor.calls))
-	}
 	want := call{name: "wtype", args: []string{"-"}, stdin: "one two"}
-	if !reflect.DeepEqual(executor.calls[3], want) {
-		t.Fatalf("fallback = %#v, want %#v", executor.calls[3], want)
+	if len(executor.calls) != 1 || !reflect.DeepEqual(executor.calls[0], want) {
+		t.Fatalf("calls = %#v, want %#v", executor.calls, []call{want})
 	}
 }
 
@@ -129,6 +131,18 @@ func TestTypeNewlineModes(t *testing.T) {
 	}
 }
 
+func TestSanitizeTextBoundedRefusesExpansionWithoutPartialOutput(t *testing.T) {
+	if got, err := SanitizeTextBounded("\n", Marker, len(newlineMarker)-1); err == nil || got != "" || errs.Classify(err) != errs.ServerError {
+		t.Fatalf("got=%q class=%q err=%v", got, errs.Classify(err), err)
+	}
+	if got, err := SanitizeTextBounded("é", Space, 2); err != nil || got != "é" {
+		t.Fatalf("got=%q err=%v", got, err)
+	}
+	if got, err := SanitizeTextBounded("é", Space, 1); err == nil || got != "" {
+		t.Fatalf("got=%q err=%v", got, err)
+	}
+}
+
 func TestSanitizeTextRemovesControlsAndPreservesUnicode(t *testing.T) {
 	input := "a\r\nb\nc\rd\te\x1bf\x00g\x7fh\u0085i\u009fjé🙂\u2028" + string([]byte{0xff})
 	tests := []struct {
@@ -148,19 +162,12 @@ func TestSanitizeTextRemovesControlsAndPreservesUnicode(t *testing.T) {
 	}
 }
 
-func TestPasteCascadeSharesOneDeadline(t *testing.T) {
+func TestPasteSingleShortcutHasDeadline(t *testing.T) {
 	var calls int
-	var deadline time.Time
 	executor := &sysexec.FakeExecutor{RunFunc: func(ctx context.Context, _ string, _ []string, _ []byte) ([]byte, error) {
 		calls++
-		got, ok := ctx.Deadline()
-		if !ok {
+		if _, ok := ctx.Deadline(); !ok {
 			t.Error("commande sans deadline")
-		}
-		if deadline.IsZero() {
-			deadline = got
-		} else if got != deadline {
-			t.Errorf("deadline %s, want %s", got, deadline)
 		}
 		return nil, errors.New("échec factice")
 	}}
@@ -171,8 +178,8 @@ func TestPasteCascadeSharesOneDeadline(t *testing.T) {
 	if err := injector.Paste(context.Background(), "fallback"); errs.Classify(err) != errs.SinkFailed {
 		t.Fatalf("error = %v, class = %s", err, errs.Classify(err))
 	}
-	if calls != 3 {
-		t.Fatalf("calls = %d, want 3", calls)
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
 	}
 }
 

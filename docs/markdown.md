@@ -20,43 +20,12 @@ plugin_zones = ["local"]
 ```
 
 `mode = "plain"` est l'identité. `enabled = false` omet entièrement l'étape,
-quel que soit le mode configuré. Le runtime impose le timeout et vérifie la zone
-déclarée par l'implémentation.
-
-Le contrat distingue `plugin.Local` et `plugin.External`. Un plugin local garde
-la signature simple `Transform(ctx, text)`. Un plugin déclarant `lan` ou
-`internet` est refusé s'il expose seulement cette signature: il doit implémenter
-`Transform(ctx, capability, text)`. Le runtime construit la capability HTTP avec
-`policy.TransportWithTrusted`, pour la zone déclarée et les CIDR de
-`policy.trusted_networks`; le plugin ne reçoit ni le client privé ni son
-transport remplaçable. `Capability.Do` remplace aussi le contexte de la requête
-par le contexte borné du runtime. Cette interface borne le chemin HTTP
-coopératif. Un plugin Go chargé dans le même processus n'est pas une sandbox
-contre du code hostile; un tel code doit être isolé dans un processus distinct.
-
-```go
-type ExternalMarkdown struct {
-	Endpoint string
-}
-
-func (ExternalMarkdown) Name() string      { return "external-markdown" }
-func (ExternalMarkdown) Zone() policy.Zone { return policy.LAN }
-func (p ExternalMarkdown) Transform(ctx context.Context, net plugin.Capability, text string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.Endpoint, strings.NewReader(text))
-	if err != nil {
-		return "", err
-	}
-	resp, err := net.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		return "", fmt.Errorf("status HTTP inattendu: %s", resp.Status)
-	}
-	return text, nil
-}
-```
+quel que soit le mode configuré. Le runtime impose le timeout, vérifie la zone
+déclarée par l'implémentation et accepte uniquement les plugins locaux
+`Transform(ctx, text)`. Un plugin déclarant `lan` ou `internet` est refusé; un
+plugin Go chargé dans le même processus n'est pas une sandbox contre du code
+hostile et doit être isolé dans un processus distinct si ce modèle devient
+nécessaire.
 
 ## Grammaire initiale
 
@@ -112,3 +81,10 @@ observées sur la branche historique `feat/markdown-v0-fixtures`, les ambiguït�
 de ponctuation et les entrées adversariales. Les fixtures invalides sont aussi
 exécutées à travers `textpipe` pour vérifier le repli post-render et l'absence de
 tokens `MURMUR_CMD`/`__WQ_` dans le résultat livré.
+
+Le rendu est linéaire et borné. La structure Markdown accepte au plus 4096
+segments et 4096 items par liste; la sortie finale est limitée à 16 Mio comptés
+en octets UTF-8 après chaque expansion. Une annulation du contexte ou un
+dépassement de limite interrompt la transformation sans retourner de sortie
+partielle; `textpipe` conserve alors le texte d'entrée rendu avant plugin et
+émet le warning typé de l'étape optionnelle.

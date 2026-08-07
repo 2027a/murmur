@@ -80,9 +80,9 @@ func New(cfg config.Config, options Options) (Sink, error) {
 			return nil, errs.New(errs.ConfigInvalid, "sink", "clipboard transient incompatible avec paste: wtype ne confirme pas la consommation du collage")
 		}
 		if mode == Type || clipboardMode == clipboard.None {
-			target = sinkFunc(injector.Type)
+			target = sinkFunc(injector.TypeSanitized)
 		} else {
-			target = sinkFunc(injector.Paste)
+			target = sinkFunc(injector.PasteSanitized)
 		}
 	case Clipboard:
 		target = sinkFunc(func(context.Context, string) error { return nil })
@@ -103,9 +103,9 @@ func New(cfg config.Config, options Options) (Sink, error) {
 
 	delivery := Sink(&clipboardSink{clipboard: board, target: target})
 	if mode == Paste || mode == Type {
-		delivery = &activeTextSink{target: delivery, newlines: activeNewlines}
+		delivery = &activeTextSink{target: delivery, newlines: activeNewlines, maxTextBytes: cfg.STT.MaxTextBytes}
 	}
-	return Once(delivery), nil
+	return delivery, nil
 }
 
 type sinkFunc func(context.Context, string) error
@@ -117,8 +117,13 @@ type stdoutSink struct {
 }
 
 func (s *stdoutSink) Deliver(_ context.Context, text string) error {
-	if _, err := fmt.Fprintln(s.writer, text); err != nil {
+	payload := text + "\n"
+	n, err := io.WriteString(s.writer, payload)
+	if err != nil {
 		return errs.Wrap(errs.SinkFailed, "sink-stdout", "écriture sur stdout impossible", err)
+	}
+	if n != len(payload) {
+		return errs.New(errs.SinkFailed, "sink-stdout", "écriture incomplète sur stdout")
 	}
 	return nil
 }
@@ -140,8 +145,13 @@ type clipboardSink struct {
 }
 
 type activeTextSink struct {
-	target   Sink
-	newlines inject.NewlineMode
+	target       Sink
+	newlines     inject.NewlineMode
+	maxTextBytes int
+}
+
+func (s *activeTextSink) sanitize(text string) (string, error) {
+	return inject.SanitizeTextBounded(text, s.newlines, s.maxTextBytes)
 }
 
 func (s *activeTextSink) CopyRaw(ctx context.Context, text string) error {
@@ -151,11 +161,19 @@ func (s *activeTextSink) CopyRaw(ctx context.Context, text string) error {
 	if !ok {
 		return nil
 	}
-	return target.CopyRaw(ctx, inject.SanitizeText(text, s.newlines))
+	sanitized, err := s.sanitize(text)
+	if err != nil {
+		return err
+	}
+	return target.CopyRaw(ctx, sanitized)
 }
 
 func (s *activeTextSink) Deliver(ctx context.Context, text string) error {
-	return s.target.Deliver(ctx, inject.SanitizeText(text, s.newlines))
+	sanitized, err := s.sanitize(text)
+	if err != nil {
+		return err
+	}
+	return s.target.Deliver(ctx, sanitized)
 }
 
 func (s *clipboardSink) CopyRaw(ctx context.Context, text string) error {
@@ -163,10 +181,11 @@ func (s *clipboardSink) CopyRaw(ctx context.Context, text string) error {
 }
 
 func (s *clipboardSink) Deliver(ctx context.Context, text string) error {
-	if err := s.clipboard.CopyFinal(ctx, text); err != nil {
-		return err
+	copyErr := s.clipboard.CopyFinal(ctx, text)
+	var targetErr error
+	if copyErr == nil {
+		targetErr = s.target.Deliver(ctx, text)
 	}
-	err := s.target.Deliver(ctx, text)
 	clearCtx := ctx
 	cancelClear := func() {}
 	// A delivery deadline must not consume the transient cleanup budget;
@@ -176,7 +195,7 @@ func (s *clipboardSink) Deliver(ctx context.Context, text string) error {
 	}
 	defer cancelClear()
 	clearErr := s.clipboard.Clear(clearCtx)
-	return errors.Join(err, clearErr)
+	return errors.Join(copyErr, targetErr, clearErr)
 }
 
 type onceSink struct {

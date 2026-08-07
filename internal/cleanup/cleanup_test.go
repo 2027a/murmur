@@ -88,6 +88,20 @@ func TestCleanupRejectsEmptyModel(t *testing.T) {
 	}
 }
 
+func TestCleanupRequiresHTTPSForInternetUnlessOptedIn(t *testing.T) {
+	_, err := NewOpenAICompatible(Config{
+		BaseURL: "http://example.com/v1", Model: "cleaner", Timeout: time.Second, AllowedZone: policy.Internet,
+	})
+	if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("constructor error = %v", err)
+	}
+	if _, err := NewOpenAICompatible(Config{
+		BaseURL: "http://example.com/v1", Model: "cleaner", Timeout: time.Second, AllowedZone: policy.Internet, AllowInsecure: true,
+	}); err != nil {
+		t.Fatalf("constructor with allow_insecure=true: %v", err)
+	}
+}
+
 func TestCleanupGuardsFallbackToInput(t *testing.T) {
 	input := "bonjour " + tokenOpen + " monde " + tokenClose
 	for _, test := range []struct {

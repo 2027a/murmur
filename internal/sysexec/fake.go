@@ -1,7 +1,9 @@
 package sysexec
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"sync"
 )
@@ -26,6 +28,11 @@ func (f *FakeExecutor) Run(ctx context.Context, name string, args []string, stdi
 		return nil, nil
 	}
 	return f.RunFunc(ctx, name, args, stdin)
+}
+
+func (f *FakeExecutor) RunDiscard(ctx context.Context, name string, args []string, stdin []byte) error {
+	_, err := f.Run(ctx, name, args, stdin)
+	return err
 }
 
 func (f *FakeExecutor) Start(ctx context.Context, name string, args []string) (Process, error) {
@@ -64,14 +71,17 @@ type FakeProcess struct {
 
 	mu      sync.Mutex
 	done    chan struct{}
+	stdin   *fakeProcessStdin
 	waitErr error
 	signals []os.Signal
 	kills   int
 }
 
 func NewFakeProcess() *FakeProcess {
-	return &FakeProcess{done: make(chan struct{})}
+	return &FakeProcess{done: make(chan struct{}), stdin: &fakeProcessStdin{}}
 }
+
+func (p *FakeProcess) Stdin() io.WriteCloser { return p.stdin }
 
 func (p *FakeProcess) Signal(sig os.Signal) error {
 	p.mu.Lock()
@@ -130,3 +140,25 @@ func (p *FakeProcess) KillCount() int {
 
 var _ Executor = (*FakeExecutor)(nil)
 var _ Process = (*FakeProcess)(nil)
+
+type fakeProcessStdin struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+	closed bool
+}
+
+func (w *fakeProcessStdin) Write(value []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return 0, io.ErrClosedPipe
+	}
+	return w.buffer.Write(value)
+}
+
+func (w *fakeProcessStdin) Close() error {
+	w.mu.Lock()
+	w.closed = true
+	w.mu.Unlock()
+	return nil
+}
