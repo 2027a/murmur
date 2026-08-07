@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -173,15 +174,24 @@ func (app App) cleanupCommand(ctx context.Context, args []string, stdout, stderr
 	emitter := newCommandEmitter(*eventOutput, stderr, "cleanup")
 	emitter.emit(events.SessionStarted, "processing", "", "", "", 0, 0, "")
 	result := newCommandResult("cleanup")
-	input, err := io.ReadAll(io.LimitReader(app.stdin(), maxCleanupInputBytes+1))
-	result.TranscriptRaw = string(input)
-	result.TranscriptFinal = string(input)
-	if err != nil {
-		err = errs.Wrap(errs.Unavailable, "stdin", "lecture de stdin impossible", err)
-		return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, true)
+	var input []byte
+	stdin, cancelRead, err := app.cancellableStdin()
+	if err == nil {
+		input, err = readAllBoundedStdin(ctx, stdin, cancelRead, maxCleanupInputBytes+1)
+		result.TranscriptRaw = string(input)
+		result.TranscriptFinal = string(input)
+		if err == nil && len(input) > maxCleanupInputBytes {
+			err = errs.New(errs.Unavailable, "stdin", "entrée cleanup supérieure à 4 MiB")
+		}
+	} else {
+		result.TranscriptRaw = ""
+		result.TranscriptFinal = ""
 	}
-	if len(input) > maxCleanupInputBytes {
-		err = errs.New(errs.Unavailable, "stdin", "entrée cleanup supérieure à 4 MiB")
+	if err != nil {
+		if errs.Classify(err) == errs.Internal || errs.Classify(err) == errs.Cancelled {
+			return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, true)
+		}
+		err = errs.Wrap(errs.Unavailable, "stdin", "lecture de stdin impossible", err)
 		return finishCommand(result, err, *jsonOutput, stdout, stderr, emitter, true)
 	}
 
@@ -293,10 +303,20 @@ func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr
 		emitter.emit(events.CaptureReady, "recording", "", "", "", 0, 0, "")
 	}
 
-	if ctx.Err() == nil {
-		if err := app.waitForDictateStop(ctx, recording); err != nil {
-			return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
-		}
+	if err := ctx.Err(); err != nil {
+		return finishCommand(result, errors.Join(
+			errs.Wrap(errs.Cancelled, "stdin", "lecture de stdin annulée", err),
+			recording.Abort(),
+		), options.jsonOutput, stdout, stderr, emitter, false)
+	}
+	if err := app.waitForDictateStop(ctx, recording); err != nil {
+		return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
+	}
+	if err := ctx.Err(); err != nil {
+		return finishCommand(result, errors.Join(
+			errs.Wrap(errs.Cancelled, "stdin", "lecture de stdin annulée", err),
+			recording.Abort(),
+		), options.jsonOutput, stdout, stderr, emitter, false)
 	}
 	stopCtx, cancelStop := context.WithTimeout(context.Background(), 10*time.Second)
 	file, err := recording.Stop(stopCtx)
@@ -305,7 +325,7 @@ func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr
 		return finishCommand(result, err, options.jsonOutput, stdout, stderr, emitter, false)
 	}
 	emitter.emit(events.StateChanged, "transcribing", "", "", "", 0, 0, "")
-	result, err = executeTranscriptionWith(context.Background(), cfg, file.Path(), transcriber, processor, emitter, "dictate")
+	result, err = executeTranscriptionWith(ctx, cfg, file.Path(), transcriber, processor, emitter, "dictate")
 	if err == nil && !(options.jsonOutput && options.sinkMode == "stdout") {
 		var delivery sink.Sink
 		delivery, err = sink.New(cfg, sink.Options{Stdout: stdout})
@@ -341,38 +361,100 @@ type stdinReadCanceler interface {
 	CancelRead() error
 }
 
+type stdinCancelFunc func() error
+
 func (app App) waitForDictateStop(ctx context.Context, recording audio.Recording) error {
-	input, cancelRead := app.dictateInput()
-	stdinDone := make(chan struct{})
+	input, cancelRead, err := app.dictateInput()
+	if err != nil {
+		return errors.Join(err, recording.Abort())
+	}
+	stdinDone := make(chan error, 1)
 	go func() {
-		_, _ = io.Copy(io.Discard, input)
-		close(stdinDone)
+		_, err := io.Copy(io.Discard, input)
+		stdinDone <- err
 	}()
 
 	select {
 	case <-ctx.Done():
-		cancelRead()
-		return nil
-	case <-stdinDone:
-		return nil
+		cancelErr := cancelRead()
+		readErr := waitForStdinCleanup(stdinDone)
+		abortErr := recording.Abort()
+		return errors.Join(errs.Wrap(errs.Cancelled, "stdin", "lecture de stdin annulée", ctx.Err()), cancelErr, readErr, abortErr)
+	case err := <-stdinDone:
+		return err
 	case <-recording.Done():
-		cancelRead()
+		cancelErr := cancelRead()
+		readErr := waitForStdinCleanup(stdinDone)
 		recordingErr := recording.Err()
 		if errs.Classify(recordingErr) != errs.AudioFailed {
 			recordingErr = errs.Wrap(errs.AudioFailed, "audio", "capture audio interrompue", recordingErr)
 		}
-		return errors.Join(recordingErr, recording.Abort())
+		return errors.Join(recordingErr, cancelErr, readErr, recording.Abort())
 	}
 }
 
-func (app App) dictateInput() (io.Reader, func()) {
+func waitForStdinCleanup(done <-chan error) error {
+	return <-done
+}
+
+func (app App) dictateInput() (io.Reader, stdinCancelFunc, error) {
+	input, cancelRead, err := app.cancellableStdin()
+	if err != nil {
+		return nil, nil, err
+	}
+	if cancelRead == nil {
+		return input, func() error { return nil }, nil
+	}
+	return input, cancelRead, nil
+}
+
+func (app App) cancellableStdin() (io.Reader, stdinCancelFunc, error) {
 	if app.Stdin == nil {
-		return os.Stdin, func() { _ = os.Stdin.Close() }
+		return os.Stdin, os.Stdin.Close, nil
 	}
 	if input, ok := app.Stdin.(stdinReadCanceler); ok {
-		return input, func() { _ = input.CancelRead() }
+		return input, input.CancelRead, nil
 	}
-	return app.Stdin, func() {}
+	if isKnownFiniteReader(app.Stdin) {
+		return app.Stdin, nil, nil
+	}
+	return nil, nil, errs.New(errs.Internal, "stdin", "stdin emprunté doit implémenter CancelRead")
+}
+
+func isKnownFiniteReader(input io.Reader) bool {
+	switch input.(type) {
+	case *bytes.Buffer, *bytes.Reader, *strings.Reader:
+		return true
+	default:
+		return false
+	}
+}
+
+func readAllBoundedStdin(ctx context.Context, input io.Reader, cancelRead stdinCancelFunc, limit int64) ([]byte, error) {
+	if cancelRead == nil {
+		return io.ReadAll(io.LimitReader(input, limit))
+	}
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		data, err := io.ReadAll(io.LimitReader(input, limit))
+		done <- readResult{data: data, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.data, result.err
+	case <-ctx.Done():
+		cancelErr := cancelRead()
+		result := <-done
+		return nil, errors.Join(
+			errs.Wrap(errs.Cancelled, "stdin", "lecture de stdin annulée", ctx.Err()),
+			cancelErr,
+			result.err,
+		)
+	}
 }
 
 func executeTranscription(ctx context.Context, cfg config.Config, path string, emitter *commandEmitter) (commandResult, error) {
@@ -432,7 +514,7 @@ func executeTranscriptionWith(ctx context.Context, cfg config.Config, path strin
 		})
 		emitter.emit(events.Degraded, "transcribing", warning.Provider, warning.Class, warning.Component, 0, 0, "")
 	}
-	emitter.emit(events.ProviderSelected, "transcribing", result.Provider, "", "stt", 0, 0, "")
+	emitter.emit(events.ProviderSelected, "transcribing", result.Provider, "", "", 0, 0, "")
 	emitter.emit(events.StateChanged, "processing", result.Provider, "", "", 0, 0, "")
 	processed, err := processor.Run(ctx, multi.Text)
 	if err != nil {
@@ -478,7 +560,11 @@ func finishCommand(result commandResult, runErr error, jsonOutput bool, stdout, 
 		if provider := stt.ProviderFromError(runErr); provider != "" {
 			result.Provider = provider
 		}
-		emitter.emit(events.Terminal, "idle", result.Provider, result.Error.Class, result.Error.Component, 0, 0, "failed")
+		terminal := "failed"
+		if result.Error.Class == errs.Cancelled {
+			terminal = "cancelled"
+		}
+		emitter.emit(events.Terminal, "idle", result.Provider, result.Error.Class, result.Error.Component, 0, 0, terminal)
 	} else {
 		result.Success = true
 		emitter.emit(events.Terminal, "idle", result.Provider, "", "", 0, 0, "completed")
