@@ -1,14 +1,41 @@
 # Revue du code et de l'intégration desktop
 
-Date : 4 septembre 2026. Révision examinée : `69a2e643` (HEAD avant cette
-documentation). Périmètre : code Go, helper Python, tests, installation,
+Date : 4 septembre 2026. Revue initiale sur `69a2e643`, actualisée sur
+`fcd52c78a765322ae60a8ab74bb30daa6f8f90c6` (HEAD au début de cette
+actualisation). Périmètre : code Go, helper Python, tests, installation,
 documentation et intégration avec le desktop et les dotfiles de Mathieu.
 
-La revue a été menée sans modifier le code ni les dotfiles. Les références de
-lignes correspondent à la révision examinée. Les constats desktop sont un
-instantané local, pas des propriétés garanties par le dépôt.
+La revue a été menée sans modifier le code ni les dotfiles. Sauf mention
+historique, les références de code correspondent au HEAD réexaminé. Les
+constats desktop restent l'instantané local de la revue initiale : le desktop,
+les dotfiles et le binaire installé n'ont pas été réinterrogés pour cette mise
+à jour. Ils ne sont pas des propriétés garanties par le dépôt.
 
-## Défauts prioritaires
+## Bilan de l'actualisation
+
+- **Toujours ouverts et reproduits sur HEAD :** les trois P1, rétention après
+  annulation, blocage live après stop et dépassement STT masqué en succès
+  partiel. Le correctif de provenance STT `95a3b5a` ne corrige pas ce dernier
+  chemin.
+- **Résolus :** perte du buffer IPC au handshake (`6c646da`) et absence de
+  tentative de clear transient après échec de copie (`985802d`). Les tests de
+  régression ajoutés passent.
+- **Simplification partiellement réalisée :** les deux tris STT par insertion
+  ont été remplacés par `sort.Slice` (`95a3b5a`). Les autres coûts et
+  abstractions signalés restent présents.
+- **Contrat de livraison modifié :** seul le premier raccourci de collage est
+  émis ; son échec ne déclenche plus de raccourci suivant ni de frappe de
+  secours. Cela ne prouve toujours pas que l'application a consommé le collage.
+- **Autres constats ouverts :** ils sont conservés ci-dessous avec leurs
+  références actuelles. Les fichiers de journalisation, le Makefile, le helper
+  Python et les documents health/migration concernés sont inchangés depuis la
+  revue initiale.
+- **Vérification :** lint et suite Go complète sous `-race` passent sur HEAD,
+  ainsi que les tests Python. Les reproductions supplémentaires des P1
+  échouent toujours comme attendu ; elles ne font pas partie de la suite
+  versionnée.
+
+## Défauts prioritaires ouverts
 
 Trois défauts reproduits remettent en cause des garanties explicites du projet.
 Ils concernent des combinaisons d'options, pas nécessairement l'usage actuel.
@@ -16,7 +43,7 @@ Ils concernent des combinaisons d'options, pas nécessairement l'usage actuel.
 ### 1. P1 : une session annulée peut conserver son audio
 
 Références : `internal/session/orchestrator.go:376-390`,
-`internal/session/orchestrator.go:486-488`,
+`internal/session/orchestrator.go:490-493`,
 `internal/audio/recorder.go:44-51`.
 
 Avec `audio.keep_recordings=true` ou `policy.retain_diagnostics=true`,
@@ -37,7 +64,9 @@ WAV conservés = 1
 Chaque WAV conservé contient les 64 044 octets de la capture synthétique de deux
 secondes. Les quatre scénarios ont échoué lors du premier essai puis de trois
 répétitions sous `-race`. Les contrôles avec rétention désactivée passent dans
-les quatre cas, sur dix répétitions sous `-race`.
+les quatre cas, sur dix répétitions sous `-race`. Sur le HEAD réexaminé, les
+quatre défauts sont à nouveau reproduits une fois et les quatre contrôles
+passent à nouveau dix fois sous `-race`.
 
 Cela contredit la garantie « une annulation ne conserve jamais la capture » de
 `README.md:487`.
@@ -82,7 +111,8 @@ liveRecording.emit
 
 Reproduit lors du premier essai puis de trois répétitions sous `-race`. Le même
 scénario avec un budget suffisant termine `completed` et livre exactement une
-fois, sur dix répétitions.
+fois, sur dix répétitions. Sur le HEAD réexaminé, le blocage est à nouveau
+reproduit une fois et le contrôle dans le budget passe dix fois sous `-race`.
 
 Conséquences : pas de résultat final, session toujours occupée ; un `cancel`
 supplémentaire débloque la situation mais remplace le résultat attendu par
@@ -97,7 +127,7 @@ Dans le TOML desktop examiné, `live_chunking` est désactivé.
 
 ### 3. P1 : un dépassement STT peut devenir un succès partiel
 
-Références : `internal/stt/stt.go:576-593`, `internal/stt/stt.go:262-290`.
+Références : `internal/stt/stt.go:583-600`, `internal/stt/stt.go:273-275`.
 
 En batch avec `allow_partial=true`, une première erreur ordinaire masque une
 erreur de budget survenue ensuite. `transcribeWith` garde `firstErr`, puis
@@ -118,31 +148,28 @@ Le dépassement est détecté, mais son caractère fatal est perdu. Ce n'est pas
 allocation illimitée : c'est la garantie de non-livraison après dépassement qui
 est contournée. La reproduction s'arrête au résultat de `TranscribeSegments` ;
 le passage jusqu'au sink est établi par lecture du pipeline de session, pas par
-une livraison réelle.
+une livraison réelle. Le même défaut et son contrôle sont à nouveau reproduits
+sur HEAD sous `-race`. La correction de provenance et de tri dans `95a3b5a`
+laisse intacte la conservation de `firstErr` sur ce chemin.
 
 Correction minimale : faire primer immédiatement les erreurs de limite et
 d'annulation sur la première erreur récupérable.
 
-## Autres défauts
+## Autres défauts ouverts
 
 Sauf indication contraire, ces constats sont établis par lecture des chemins
 d'exécution, sans reproduction de leur effet sur le desktop.
 
 ### Concurrence et texte
 
-- **P2 : perte ou corruption d'événements IPC au handshake.**
-  `internal/ipc/client.go:63-82` utilise un décodeur pour l'accusé, puis un autre
-  pour les événements. Le premier peut précharger des octets du premier
-  événement ; ils sont abandonnés. Réutiliser le même `json.Decoder` suffit.
-  Le test existant publie seulement après le retour de `Subscribe`, donc évite
-  le cas.
 - **P2 : écriture non protégée de `runResult`.**
   `internal/session/orchestrator.go:166` affecte la structure hors de
   `metadataMu`, alors que `currentProvider()` la lit sous ce mutex à
-  `:603-606`. Un handler `cancel` déjà engagé peut croiser cette affectation.
+  `:607-610`. Un handler `cancel` déjà engagé peut croiser cette affectation.
   Course identifiée statiquement, non déclenchée sous `-race`. Calculer le
   résultat localement, puis l'affecter sous verrou, sans conserver le verrou
-  pendant l'appel à `finalResult`.
+  pendant l'appel à `finalResult`. Le test concurrent existant passe dix
+  répétitions supplémentaires, sans couvrir l'entrelacement identifié.
 - **P2 : la fermeture des guillemets colle le mot suivant.**
   `internal/textpipe/render.go:37-39` supprime systématiquement l'espace après
   la commande de fermeture. Une phrase comme `ouvre les guillemets bonjour
@@ -181,21 +208,24 @@ d'exécution, sans reproduction de leur effet sur le desktop.
 ### Configuration et diagnostic
 
 - **P2 : `trusted_networks` est contredit par le préflight.**
-  `internal/config/validate.go:278-279` rejette une IP littérale non privée
+  `internal/config/validate.go:272-273` rejette une IP littérale non privée
   déclarée en zone LAN, même explicitement couverte par un CIDR fiable.
   Reproduit : le transport classe l'adresse synthétique en LAN, mais la
   configuration la refuse. Utiliser une classification commune ; inutile
-  d'ajouter une résolution DNS au préflight.
+  d'ajouter une résolution DNS au préflight. Reproduction rejouée sur HEAD :
+  le rejet persiste malgré `add0d10`, qui a notamment rendu l'ordre de
+  validation déterministe.
 - **P2 : `doctor` exige parfois un outil inutilisé.**
   `internal/doctor/doctor.go:180-188` exige `wl-copy` pour `paste`, même avec
   `clipboard_mode="none"`. Or `internal/sink/sink.go:82-83` passe alors
   directement par la frappe. Une configuration fonctionnelle peut donc
   produire un diagnostic rouge.
 - **P2 : le nom réservé `mixed` est accepté comme provider réel.**
-  `internal/config/validate.go:130-165` l'accepte, alors que
+  `internal/config/validate.go:130-146` l'accepte, alors que
   `internal/cli/composable.go:107-108` l'interdit dans les segments du contrat
   JSON. L'acceptation au préflight est reproduite ; la contradiction de sortie
-  est établie par lecture. Réserver ce nom à la validation.
+  est établie par lecture. Réserver ce nom à la validation. Le préflight
+  accepte encore ce nom dans la reproduction rejouée sur HEAD.
 - **P3 : le health check du cœur est surtout une promesse documentaire.**
   `docs/providers.md:65-68` annonce un appel à `Health` par le cœur et
   `doctor`. Le seul appel de production trouvé est celui de `doctor`, à
@@ -205,18 +235,14 @@ d'exécution, sans reproduction de leur effet sur le desktop.
 
 ### Helpers et vérification
 
-- **P2 : le clear transient est sauté si la copie échoue.**
-  `internal/sink/sink.go:166-167` retourne avant la compensation. Une commande
-  externe peut avoir produit son effet avant d'échouer ; l'échec ne prouve pas
-  que le clipboard est resté intact. Faire passer ce chemin par la tentative
-  de nettoyage, sans perdre l'erreur initiale ni la distinction avec une
-  annulation explicite.
 - **P2 : des descendants d'un helper OSD peuvent survivre au leader.**
-  `internal/sysexec/sysexec.go:196-215` considère le processus terminé dès la
+  `internal/sysexec/sysexec.go:219-238` considère le processus terminé dès la
   mort du leader ; un `Kill()` ultérieur ne signale plus son groupe. Cela
   concerne notamment un helper personnalisé qui lance un enfant puis sort.
   La correction doit rester spécifique à la supervision attendue : ne pas
   tuer aveuglément les descendants volontairement persistants de `wl-copy`.
+  L'ajout de `RunDiscard` ne corrige pas cette supervision. Les tests de groupe
+  gardent le leader vivant jusqu'à l'annulation et ne couvrent pas ce cas.
 - **P3 : le helper Python confond `HUP` avec un pipe vidé.**
   `helpers/osd-gtk/murmur-osd.py:169-187` effectue une seule lecture puis ferme
   sur `HUP`. Reproduit avec entrées simulées : un terminal placé après les
@@ -228,7 +254,41 @@ d'exécution, sans reproduction de leur effet sur le desktop.
   cette recette est une correction petite et utile. Constat issu de la
   lecture, pas d'un échec d'installation provoqué.
 
+## Constats résolus
+
+### Buffer IPC au handshake
+
+Le correctif `6c646da` conserve le même `json.Decoder` pour l'accusé puis les
+événements : `internal/ipc/client.go:63-85`, helper à `:128-132`. Les octets
+préchargés ne sont plus perdus entre deux décodeurs.
+
+`TestSubscribePreservesEventBufferedWithHandshake`, à
+`internal/ipc/ipc_test.go:289`, écrit l'accusé et l'événement ensemble. Les tests
+d'abonnement passent dix répétitions sous `-race`. Le défaut initial est clos ;
+la perte d'événements sous surcharge, explicitement documentée, est un autre
+contrat et n'est pas remise en cause par cette correction.
+
+### Clear transient après échec de copie
+
+Le correctif `985802d` conserve l'erreur de copie, interdit l'injection après
+cet échec, tente le clear et joint les erreurs :
+`internal/sink/sink.go:170-188`. La documentation correspondante est mise à jour
+dans `docs/sinks.md:38-43`.
+
+La régression de `internal/sink/sink_test.go:523-542` vérifie exactement un
+clear, aucune injection et les deux causes d'erreur. Elle passe, comme les
+tests du budget compensatoire et de l'annulation explicite.
+
+Ce constat portait sur l'absence de tentative, pas sur une garantie
+d'effacement. Une annulation explicite reste attachée au contexte, le clear
+peut échouer et les modes persistants ne sont pas effacés.
+
 ## Intégration desktop
+
+Cette section conserve les observations locales de la revue sur `69a2e643`.
+Leur validité actuelle n'est pas attestée par cette actualisation du code.
+Les conséquences du nouveau contrat de collage sont distinguées ci-dessous ;
+elles ne prouvent pas que le binaire installé a été mis à jour.
 
 ### Points à corriger ou à décider
 
@@ -248,25 +308,37 @@ côté API Lua et la frappe physique restent à valider.
 
 `~/dotfiles/murmur/config.toml:79-85` active `dangerous-keep` et conserve donc
 les retours à la ligne dans l'injection active. Dans un terminal, leur effet
-dépend du traitement du collage ; en frappe de repli, ils peuvent soumettre
-des lignes.
+dépend du traitement du collage. Sur HEAD, le collage ne retombe plus sur la
+frappe après un échec : la mention initiale d'une « frappe de repli » est donc
+obsolète pour ce chemin. Le risque de soumettre des lignes par frappe reste
+pertinent pour une frappe directe (`type`, clipboard `none` ou liste de
+raccourcis vide).
 
 C'est un choix explicite, pas un bug. Pour un raccourci global susceptible de
 viser un shell, préférer `space`, avec `clipboard-only` pour les sorties
 multilignes.
 
-#### Limites de la cascade de collage
+#### Limites du raccourci de collage
 
 La liste commence par `ctrl+shift+v`, puis `shift+insert`, puis `ctrl+v` :
 `~/dotfiles/murmur/config.toml:82`.
 
-`internal/inject/inject.go:64-77` s'arrête dès que `wtype` réussit. Cela
-confirme l'émission des touches, pas le collage. Une application qui ignore
-le premier raccourci ne provoquera pas l'essai du suivant.
+Sur la révision initiale, la cascade s'arrêtait dès que `wtype` réussissait,
+sans vérifier la consommation par l'application. Sur HEAD,
+`internal/inject/inject.go:64-78` n'émet désormais que le premier raccourci,
+même s'il échoue. Aucun raccourci suivant ni frappe de secours n'est alors
+tenté. Une liste vide choisit directement la frappe.
+
+Avec la liste historiquement observée, seul `ctrl+shift+v` serait utilisé par
+le code actuel. `shift+insert` et `ctrl+v` ne sont plus des secours techniques.
+Un succès de `wtype` confirme toujours seulement l'émission des touches, pas
+le collage dans l'application.
 
 Le comportement est documenté, mais sa limite est importante pour l'usage
-global GTK/Qt/terminal. Aucun échec applicatif n'a été provoqué pendant cette
-revue.
+global GTK/Qt/terminal. Les tests `TestPasteUsesOnlyFirstShortcut` et
+`TestPasteWithoutShortcutTypesOnce` passent ; aucun échec applicatif n'a été
+provoqué pendant cette revue. Les documents normatifs sont alignés, notamment
+`docs/desktop-validation.md:131-135` et `docs/sinks.md:98-103`.
 
 #### Historique clipboard
 
@@ -290,13 +362,13 @@ Le son est activé dans `~/dotfiles/murmur/config.toml:90-91`, alors que
 activation. Les lecteurs et le fichier sonore existent ; audibilité et timing
 n'ont pas été testés.
 
-### Éléments cohérents et vérifiés
+### Éléments vérifiés initialement
 
 | Domaine | État vérifié |
 |---|---|
 | Dotfiles | `~/.config/murmur` pointe vers `~/dotfiles/murmur` ; TOML propriétaire Mathieu, mode `0600`. Hyprland et zsh utilisent également les liens vers les dotfiles. |
 | Installation | Binaire et helper sous `~/.local/bin` ; `murmur help` fonctionne hors checkout. Documentation installée présente. |
-| Version | Binaire installé identique à `build/murmur`, métadonnées correspondant au HEAD examiné, `vcs.modified=false`. |
+| Version | Lors de la revue initiale, binaire installé identique à `build/murmur`, métadonnées correspondant à `69a2e643`, `vcs.modified=false`. Aucune correspondance au nouveau HEAD vérifiée. |
 | Hyprland | Version 0.56.2, session active Quickshell, import des bindings communs, raccourcis principaux présents. |
 | Exécutables | Les bindings utilisent le chemin absolu de Murmur, évitant une dépendance au PATH pour le lancer. |
 | Audio | PipeWire et WirePlumber actifs ; source par défaut RØDE NT-USB+ Mono, non muette. `audio.source=""` suit ce défaut sans verrouiller ce microphone. |
@@ -327,7 +399,7 @@ Les simplifications les plus rentables :
    et « finir la session » sont trop liés implicitement. C'est la première
    simplification à faire, avant toute factorisation.
 2. **Partager le traitement batch d'un WAV déjà ouvert.**
-   `internal/session/orchestrator.go:459-499` et
+   `internal/session/orchestrator.go:463-503` et
    `internal/core/transcribe.go:18-69` répètent découpage, requêtes et
    nettoyage, avec des appels STT différents. Une fonction commune étroite
    réduirait les divergences ; pas besoin d'un framework de workflows.
@@ -336,15 +408,18 @@ Les simplifications les plus rentables :
    Une ouverture validée commune suffit ; fusionner les writers et leurs
    files compliquerait inutilement.
 4. **Supprimer les abstractions sans usage.** `Text` et `Stage` dans
-   `internal/textpipe/pipeline.go:32-42`, ainsi que `LiveRecording.Errors()`
+   `internal/textpipe/pipeline.go:33-43`, ainsi que `LiveRecording.Errors()`
    dans `internal/audio/live.go:35`, ajoutent un modèle parallèle ou un canal
    sans consommateur actuel.
-5. **Remplacer les algorithmes artisanaux coûteux.** Les tris par insertion de
-   `internal/stt/stt.go:504-516` et `:618-625` devraient être des
-   `slices.SortFunc`. Avec 65 536 segments autorisés, c'est à la fois plus
-   simple et plus prévisible. Même logique pour les concaténations Markdown
-   répétées. Le contrôle de fuite des tokens dans
-   `internal/textpipe/render.go:72-75` parcourt aussi le résultat une fois par
+5. **Remplacer les algorithmes artisanaux coûteux : partiellement résolu.**
+   Les deux tris STT par insertion ont été remplacés par `sort.Slice` dans
+   `95a3b5a` : appels à `internal/stt/stt.go:506` et `:625`, implémentations
+   à `:634-639`. Cela résout le coût quadratique signalé ; le choix de
+   `sort.Slice` plutôt que `slices.SortFunc` n'appelle pas un nouveau refactoring.
+   Les tests d'ordre passent, sans benchmark à 65 536 segments. Restent les
+   concaténations Markdown répétées dans
+   `internal/plugin/markdown/markdown.go:363-383`. Le contrôle de fuite des tokens
+   dans `internal/textpipe/render.go:72-75` parcourt aussi le résultat une fois par
    token ; une recherche unique du namespace généré serait plus économique.
 6. **Réduire la duplication documentaire.** Le README de plus de 500 lignes
    répète beaucoup de contrats détaillés ailleurs. Les écarts sur le health
@@ -362,23 +437,39 @@ est déjà documentée.
 
 ## Vérifications et limites
 
-- `make lint` passe.
-- La suite complète `go test -mod=readonly -race -count=1 ./...` passe au
-  second lancement, avec `GOPROXY=off`, `GOSUMDB=off` et `GOTOOLCHAIN=local`.
-- Le premier lancement échoue sur
+### Résultats sur HEAD
+
+- `make lint` passe sur `fcd52c7`.
+- La suite complète `go test -mod=readonly -race -count=1 ./...` passe dès le
+  lancement de cette actualisation, avec `GOPROXY=off`, `GOSUMDB=off` et
+  `GOTOOLCHAIN=local`.
+- Lors de la revue initiale, le premier lancement avait échoué sur
   `TestOpenAICompatibleClassifiesResponses/large_response` : timeout au lieu
   de `server_error`. Le test impose une seconde pour traiter plus de 4 Mio
   sous `-race`, à `internal/stt/openai_test.go:160-168`. Dix répétitions
-  isolées passent ensuite : test vraisemblablement sensible à la charge.
-- Les tests Python OSD passent avec
+  isolées avaient ensuite passé : test vraisemblablement sensible à la charge.
+  Le fichier de test est inchangé ; le problème n'a pas été reproduit pendant
+  cette actualisation, sans que cela démontre une correction.
+- Les deux tests Python OSD passent à nouveau avec
   `python3 -B -m unittest discover -s helpers/osd-gtk -p 'test_*.py'`.
-- Les trois défauts prioritaires sont reproduits avec des tests temporaires
-  injectés par overlay, sans modifier le dépôt. Les processus audio et les
+- Les trois défauts prioritaires sont à nouveau reproduits sous `-race` avec
+  des tests temporaires injectés par overlay, sans modifier le dépôt. Les processus audio et les
   providers sont simulés ; les adaptateurs et mécanismes de rétention ou de
-  budget concernés sont ceux du projet.
+  budget concernés sont ceux du projet. Les contrôles session avec rétention
+  désactivée ou budget suffisant passent dix fois. Les reproductions config
+  continuent aussi de montrer le refus d'une IP LAN fiable et l'acceptation de
+  `mixed`.
+- Les tests ciblés d'abonnement IPC, de concurrence session, de provenance et
+  budgets STT et de transcription core passent dix répétitions sous `-race`.
+  Les tests versionnés ne couvrent toujours pas les combinaisons des trois P1.
+  Aucun `WARNING: DATA RACE` n'est observé ; le constat statique sur
+  `runResult` n'est ni reproduit ni invalidé par ce résultat.
 - Les tests locaux utilisent Go `1.27.0-X:nodwarf5` ; la matrice CI déclarée
   Go 1.23/1.26 n'a pas été rejouée. Le binaire desktop examiné a été construit
-  avec Go `1.26.5-X:nodwarf5`.
+  avec Go `1.26.5-X:nodwarf5` lors de l'inspection initiale.
+
+### Limites desktop
+
 - Aucun microphone, collage, frappe, notification, son ou appel provider réel
   n'a été déclenché. Aucun secret ni contenu du clipboard n'a été lu.
 - `doctor` n'a pas été lancé contre la configuration réelle, puisqu'il peut
@@ -405,8 +496,8 @@ commandes ne sont donc pas reproductibles depuis un clone seul.
 /tmp/opencode/murmur-review-overlay.json
 ```
 
-Reproductions session, échec attendu puisque les assertions expriment le
-comportement correct :
+Reproductions session rejouées sur HEAD, échec attendu puisque les assertions
+expriment le comportement correct :
 
 ```sh
 GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
@@ -415,7 +506,7 @@ go test -overlay=/tmp/opencode/murmur-p1-overlay.json \
   -run '^TestReviewP1'
 ```
 
-Contrôles session, succès attendu :
+Contrôles session rejoués sur HEAD, succès attendu :
 
 ```sh
 GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
@@ -424,19 +515,21 @@ go test -overlay=/tmp/opencode/murmur-p1-overlay.json \
   -run '^TestReview(RetentionDisabledControl|LiveWithinBudgetControl)$'
 ```
 
-Reproductions du budget STT et de la validation des providers, échecs attendus :
+Reproductions du budget STT et de la validation des providers rejouées sur HEAD,
+échecs attendus :
 
 ```sh
 GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
 go test -overlay=/tmp/opencode/murmur-review-overlay.json \
-  ./internal/stt -run '^TestReview' -v -count=1
+  -race ./internal/stt -run '^TestReview' -v -count=1
 ```
 
 ## Ordre recommandé
 
 1. Corriger les trois défauts prioritaires et ajouter leurs tests de
    combinaison au dépôt.
-2. Traiter IPC, guillemets, ouverture des fichiers et rotation.
+2. Traiter la course sur `runResult`, les guillemets, l'ouverture des fichiers
+   et la rotation. Le buffer IPC et le clear transient ne sont plus à corriger.
 3. Réparer le binding de secours et décider explicitement de la politique
    d'injection multilignes et d'historique clipboard.
 4. Corriger les autres contrats et simplifier les duplications.
