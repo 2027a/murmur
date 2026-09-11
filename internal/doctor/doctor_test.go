@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -573,6 +574,68 @@ func TestOutputFileCheckDoesNotCreateFinalFile(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("final file was created: %v", err)
+	}
+}
+
+func TestOutputFileCheckProbesSiblingAtomicallyWithoutTouchingDestination(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "output.txt")
+	if err := os.WriteFile(path, []byte("existing"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkOutputFile(path); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "existing" || after.ModTime() != before.ModTime() || after.Size() != before.Size() {
+		t.Fatalf("destination touched: before=%#v after=%#v data=%q", before, after, data)
+	}
+	assertNoDoctorProbe(t, dir)
+}
+
+func TestOutputFileCheckRejectsUnsafeDestinations(t *testing.T) {
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "regular.txt")
+	if err := os.WriteFile(regular, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(regular, link); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{link, fifo, dir} {
+		if err := checkOutputFile(path); err == nil {
+			t.Fatalf("unsafe path accepted: %s", path)
+		}
+	}
+	assertNoDoctorProbe(t, dir)
+}
+
+func assertNoDoctorProbe(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".murmur-doctor-") {
+			t.Fatalf("doctor probe left behind: %s", entry.Name())
+		}
 	}
 }
 

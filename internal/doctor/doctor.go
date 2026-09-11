@@ -333,27 +333,36 @@ func checkRuntime() error {
 
 func checkOutputFile(path string) error {
 	path = filepath.Clean(path)
-	if info, err := os.Stat(path); err == nil {
+	if info, err := os.Lstat(path); err == nil {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("le chemin existe mais n'est pas un fichier regulier")
 		}
-		file, openErr := os.OpenFile(path, os.O_WRONLY, 0)
-		if openErr != nil {
-			return fmt.Errorf("fichier non accessible en ecriture")
-		}
-		return file.Close()
 	} else if !os.IsNotExist(err) {
 		return err
 	}
 	parent := filepath.Dir(path)
+	if info, err := os.Lstat(parent); err != nil {
+		return err
+	} else if !info.IsDir() {
+		return fmt.Errorf("repertoire de sortie invalide")
+	}
 	file, err := os.CreateTemp(parent, ".murmur-doctor-*")
 	if err != nil {
 		return fmt.Errorf("repertoire de sortie non accessible en ecriture")
 	}
-	name := file.Name()
+	source := file.Name()
+	target := source + ".replace"
+	defer os.Remove(source)
+	defer os.Remove(target)
+	if _, err := file.Write([]byte("probe\n")); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("fichier de sonde non accessible en ecriture")
+	}
 	if closeErr := file.Close(); closeErr != nil {
-		os.Remove(name)
 		return closeErr
 	}
-	return os.Remove(name)
+	if err := os.Rename(source, target); err != nil {
+		return fmt.Errorf("remplacement atomique indisponible")
+	}
+	return os.Remove(target)
 }

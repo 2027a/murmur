@@ -381,6 +381,60 @@ func TestLastResultJournalRewriteIsCommittedOnlyAfterFinalWrite(t *testing.T) {
 	}
 }
 
+func TestLastResultValidateRejectsSemanticContradictions(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*LastResult)
+	}{
+		{"success with error", func(result *LastResult) {
+			result.Error = &ResultError{Class: errs.Internal, Message: "unexpected"}
+		}},
+		{"failure without error", func(result *LastResult) {
+			result.Result = Failed
+			result.Error = nil
+		}},
+		{"error without class", func(result *LastResult) {
+			result.Result = Failed
+			result.Error = &ResultError{Message: "failed"}
+		}},
+		{"warning without component", func(result *LastResult) {
+			result.Warnings = []ResultWarning{{Class: errs.Timeout, Message: "slow"}}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := testLastResult("semantic-session")
+			test.mutate(&result)
+			if err := result.Validate(); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestLastResultValidateKeepsProducedV1Shapes(t *testing.T) {
+	for _, result := range []LastResult{
+		testLastResult("completed-without-provider"),
+		{
+			Version: 1, SessionID: "cancelled", Result: Cancelled,
+			StartedAt:  time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC),
+			FinishedAt: time.Date(2026, 7, 31, 10, 0, 1, 0, time.UTC),
+		},
+		{
+			Version: 1, SessionID: "failed", Result: Failed,
+			StartedAt:  time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC),
+			FinishedAt: time.Date(2026, 7, 31, 10, 0, 1, 0, time.UTC),
+			Error:      &ResultError{Class: errs.Internal, Message: "échec de la session"},
+			Warnings: []ResultWarning{{
+				Class: errs.Internal, Component: "session-journal", Message: "journal de session dégradé",
+			}},
+		},
+	} {
+		if err := result.Validate(); err != nil {
+			t.Fatalf("produced v1 result rejected: %#v: %v", result, err)
+		}
+	}
+}
+
 func testLastResult(sessionID string) LastResult {
 	now := time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC)
 	return LastResult{

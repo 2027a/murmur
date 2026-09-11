@@ -130,6 +130,15 @@ func (r observedRecorder) Start(ctx context.Context, opts audio.RecordOptions) (
 	return recording, err
 }
 
+type countingStartRecorder struct {
+	calls atomic.Int32
+}
+
+func (r *countingStartRecorder) Start(context.Context, audio.RecordOptions) (audio.Recording, error) {
+	r.calls.Add(1)
+	return nil, errors.New("unexpected recorder start")
+}
+
 type blockingStateUI struct {
 	state   State
 	entered chan struct{}
@@ -227,6 +236,62 @@ func TestStopDuringStartingCompletes(t *testing.T) {
 	result := awaitResult(t, done)
 	if result.Result != Completed || target.count() != 1 {
 		t.Fatalf("result=%#v sink calls=%d", result, target.count())
+	}
+}
+
+func TestParentCancelledBeforeRunCallsNoComponentAndPersistsSingleCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runtimeDir := t.TempDir()
+	recorder := &countingStartRecorder{}
+	transcriber := &fakeTranscriber{started: make(chan struct{})}
+	processor := &fakeProcessor{started: make(chan struct{})}
+	target := &fakeSink{started: make(chan struct{})}
+	bus := events.NewBus()
+	defer bus.Close()
+	stream, unsubscribe := bus.Subscribe(16)
+	defer unsubscribe()
+	o, err := NewOrchestrator(OrchestratorOptions{
+		Context: ctx, SessionID: "pre-cancelled", RuntimeDir: runtimeDir,
+		Recorder: recorder, RecordOptions: audio.RecordOptions{Directory: runtimeDir},
+		Transcriber: transcriber, Processor: processor, Sink: target,
+		UI: ui.NewNone(), Bus: bus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, runErr, persistErr := o.Run()
+	if runErr != nil || persistErr != nil || result.Result != Cancelled {
+		t.Fatalf("result=%#v runErr=%v persistErr=%v", result, runErr, persistErr)
+	}
+	if recorder.calls.Load() != 0 || target.count() != 0 {
+		t.Fatalf("components called: recorder=%d sink=%d", recorder.calls.Load(), target.count())
+	}
+	select {
+	case <-transcriber.started:
+		t.Fatal("transcriber called")
+	default:
+	}
+	select {
+	case <-processor.started:
+		t.Fatal("processor called")
+	default:
+	}
+	terminal := 0
+	for len(stream) > 0 {
+		if event := <-stream; event.Type == events.Terminal {
+			terminal++
+			if event.Result != string(Cancelled) {
+				t.Fatalf("terminal event=%#v", event)
+			}
+		}
+	}
+	if terminal != 1 {
+		t.Fatalf("terminal events=%d, want 1", terminal)
+	}
+	persisted, err := ReadLastResult(runtimeDir)
+	if err != nil || persisted.Result != Cancelled {
+		t.Fatalf("persisted=%#v error=%v", persisted, err)
 	}
 }
 
@@ -713,7 +778,7 @@ func TestLiveTranscriptBudgetAbortsCaptureWithoutStopOrSink(t *testing.T) {
 }
 
 func TestDeliveryTimeoutReleasesSessionResourcesForNextSession(t *testing.T) {
-	runtimeDir := t.TempDir()
+	runtimeDir := shortTempDir(t)
 	lock, err := AcquireLock(runtimeDir)
 	if err != nil {
 		t.Fatal(err)
@@ -787,7 +852,7 @@ func TestFakeIntegrationStartStatusCancelCycle(t *testing.T) {
 	if err := o.Begin(); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "session.sock")
+	path := filepath.Join(shortTempDir(t), "session.sock")
 	server, err := ipc.Listen(path, o, o.bus)
 	if err != nil {
 		t.Fatal(err)
@@ -818,7 +883,7 @@ func TestBootstrapSocketRelaysStopBeforeAttach(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "session.sock")
+	path := filepath.Join(shortTempDir(t), "session.sock")
 	server, err := ipc.Listen(path, bootstrap, bus)
 	if err != nil {
 		t.Fatal(err)
@@ -837,7 +902,7 @@ func TestBootstrapSocketRelaysStopBeforeAttach(t *testing.T) {
 
 	ready := make(chan struct{})
 	machine, startedAt := bootstrap.machineOptions()
-	runtimeDir := t.TempDir()
+	runtimeDir := shortTempDir(t)
 	o, err := NewOrchestrator(OrchestratorOptions{
 		Context: bootstrap.Context(), SessionID: "bootstrap", RuntimeDir: runtimeDir,
 		Recorder:      &audio.FakeRecorder{FixturePath: sessionWAV(t), ReadyGate: ready},
@@ -1187,6 +1252,16 @@ func await(t *testing.T, signal <-chan struct{}) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("operation timeout")
 	}
+}
+
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "murmur-session-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 func waitForState(t *testing.T, o *Orchestrator, wanted State) {

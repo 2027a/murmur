@@ -83,7 +83,7 @@ func TestCancelDuringDeliveringIsNonDestructive(t *testing.T) {
 
 func TestStateCommandMatrix(t *testing.T) {
 	allowed := map[State]map[Command]bool{
-		Idle:         {StartCommand: true, ToggleCommand: true},
+		Idle:         {StartCommand: true, ToggleCommand: true, CancelCommand: true},
 		Starting:     {CaptureReadyCommand: true, StopCommand: true, ToggleCommand: true, CancelCommand: true, FailCommand: true},
 		Recording:    {StopCommand: true, ToggleCommand: true, CancelCommand: true, FailCommand: true},
 		Stopping:     {CaptureStoppedCommand: true, NoSpeechCommand: true, CancelCommand: true, FailCommand: true},

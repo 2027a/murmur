@@ -218,5 +218,25 @@ func (r LastResult) Validate() error {
 	if r.StartedAt.IsZero() || r.FinishedAt.IsZero() || r.FinishedAt.Before(r.StartedAt) {
 		return errs.New(errs.Internal, "session-result", "horodatages du résultat invalides")
 	}
+	switch r.Result {
+	case Failed:
+		if r.Error == nil {
+			return errs.New(errs.Internal, "session-result", "erreur manquante pour un résultat échoué")
+		}
+	case Completed, Cancelled, NoSpeech:
+		if r.Error != nil {
+			return errs.New(errs.Internal, "session-result", "erreur présente pour un résultat non échoué")
+		}
+	}
+	if r.Error != nil {
+		if r.Error.Class == "" || r.Error.Message == "" {
+			return errs.New(errs.Internal, "session-result", "erreur de résultat incomplète")
+		}
+	}
+	for _, warning := range r.Warnings {
+		if warning.Class == "" || warning.Component == "" || warning.Message == "" {
+			return errs.New(errs.Internal, "session-result", "avertissement de résultat incomplet")
+		}
+	}
 	return nil
 }
