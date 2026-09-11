@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,6 +150,51 @@ func TestRetentionIsBounded(t *testing.T) {
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		t.Fatalf("store de rétention = %v", info.Mode())
+	}
+}
+
+func TestWavFileReleaseRetainsValidatedSnapshotBytes(t *testing.T) {
+	root := t.TempDir()
+	captureDir := filepath.Join(root, "capture")
+	if err := os.Mkdir(captureDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(captureDir, "recording.wav")
+	validated := audioFixture(t, 120*time.Millisecond)
+	original, err := os.ReadFile(validated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, append(append([]byte(nil), original...), []byte("physical suffix")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := wav.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := append([]byte(nil), original...)
+	for index := 44; index < len(mutated); index++ {
+		mutated[index] ^= 0xff
+	}
+	if err := os.WriteFile(source, append(mutated, []byte("mutated suffix")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := filepath.Join(root, "diagnostics")
+	retained, err := NewWavFile(file, captureDir, RetentionOptions{
+		Keep: true, Directory: diagnostics, MaxFiles: 10, MaxBytes: 1 << 20,
+	}).Release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, original) {
+		t.Fatalf("rétention=%d octets, snapshot validé=%d", len(data), len(original))
+	}
+	if bytes.Contains(data, []byte("suffix")) {
+		t.Fatal("la rétention a conservé un suffixe physique hors RIFF")
 	}
 }
 
@@ -572,6 +618,54 @@ func TestFakeLiveSnapshotsMergeTailWithoutLosingSamples(t *testing.T) {
 	}
 }
 
+func TestGrowingSegmenterSnapshotsPinnedDescriptorAfterPathReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "recording.wav")
+	if err := wav.CreateGrowing(path); err != nil {
+		t.Fatal(err)
+	}
+	source, err := wav.OpenGrowing(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(dir, "original.wav")
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	replacement := audioFixture(t, time.Second)
+	replacementData, err := os.ReadFile(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, replacementData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	segmenter, err := NewGrowingSegmenterFromFile(source, path, dir, LiveOptions{SegmentDuration: time.Second / wav.SampleRate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer segmenter.Close()
+
+	originalPCM := []byte{0x11, 0x22, 0x33, 0x44}
+	if _, err := writer.Write(originalPCM); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	segments, err := segmenter.Poll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(segments) != 1 || !bytes.Equal(readWAVFileData(t, segments[0].File), originalPCM[:wav.BlockAlign]) {
+		t.Fatalf("segment depuis chemin remplacé: %#v data=%v", segments, readWAVFileData(t, segments[0].File))
+	}
+}
+
 func TestFakeLiveStopBeforeReadinessDoesNotDeadlock(t *testing.T) {
 	gate := make(chan struct{})
 	root := t.TempDir()
@@ -734,4 +828,18 @@ func audioFixture(t *testing.T, duration time.Duration) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func readWAVFileData(t *testing.T, file wav.File) []byte {
+	t.Helper()
+	reader, handle, err := file.OpenData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, readErr := io.ReadAll(reader)
+	closeErr := handle.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("lecture WAV: %v, %v", readErr, closeErr)
+	}
+	return data
 }

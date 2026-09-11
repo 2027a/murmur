@@ -147,12 +147,13 @@ func TestOpenFileTypePolicy(t *testing.T) {
 
 func TestOpenRejectsCorruptionAndWrongFormats(t *testing.T) {
 	tests := map[string][]byte{
-		"short":        []byte("RIFF"),
-		"not wave":     []byte("RIFF\x04\x00\x00\x00NOPE"),
-		"missing fmt":  riff(chunk("data", nil)),
-		"missing data": riff(chunk("fmt ", pcmFormat())),
-		"odd data":     riff(chunk("fmt ", pcmFormat()), chunk("data", []byte{1})),
-		"truncated":    append(riff(chunk("fmt ", pcmFormat()), chunk("data", samples(2))), 0),
+		"short":           []byte("RIFF"),
+		"not wave":        []byte("RIFF\x04\x00\x00\x00NOPE"),
+		"missing fmt":     riff(chunk("data", nil)),
+		"data before fmt": riff(chunk("data", samples(1)), chunk("fmt ", pcmFormat())),
+		"missing data":    riff(chunk("fmt ", pcmFormat())),
+		"odd data":        riff(chunk("fmt ", pcmFormat()), chunk("data", []byte{1})),
+		"truncated":       append(riff(chunk("fmt ", pcmFormat()), chunk("data", samples(2))), 0),
 	}
 	wrong := pcmFormat()
 	binary.LittleEndian.PutUint32(wrong[4:8], 48000)
@@ -170,6 +171,29 @@ func TestOpenRejectsCorruptionAndWrongFormats(t *testing.T) {
 				t.Fatalf("Open() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestStreamingReadersRejectDataBeforeFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad-growing.wav")
+	writeFile(t, path, riff(chunk("data", samples(1)), chunk("fmt ", pcmFormat())))
+
+	ready, err := HasAudioData(path)
+	if err == nil || ready || errs.Classify(err) != errs.AudioFailed {
+		t.Fatalf("HasAudioData() ready=%v error=%v", ready, err)
+	}
+	snapshot, ok, err := Snapshot(path)
+	if err == nil || ok || snapshot.Path() != "" || errs.Classify(err) != errs.AudioFailed {
+		t.Fatalf("Snapshot() file=%#v ok=%v error=%v", snapshot, ok, err)
+	}
+	source, err := OpenGrowing(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	snapshot, ok, err = SnapshotOpen(source, path)
+	if err == nil || ok || snapshot.Path() != "" || errs.Classify(err) != errs.AudioFailed {
+		t.Fatalf("SnapshotOpen() file=%#v ok=%v error=%v", snapshot, ok, err)
 	}
 }
 

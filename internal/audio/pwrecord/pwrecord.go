@@ -155,6 +155,9 @@ func (r *recording) watchReadiness(ctx context.Context) {
 			return
 		case <-ticker.C:
 			ready, err := wav.HasAudioData(r.path)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			if err != nil {
 				r.publishReady(err)
 				_ = r.abort(err)
@@ -188,7 +191,7 @@ func (r *recording) publishReady(err error) {
 func (r *recording) Stop(ctx context.Context) (audio.WavFile, error) {
 	owner, _, endedErr := r.begin(actionStopping, nil)
 	if !owner {
-		return r.waitFinished(ctx, r.stopGrace+r.killWait)
+		return r.observeFinished(ctx, r.stopGrace+r.killWait)
 	}
 	if endedErr != nil {
 		r.complete(audio.WavFile{}, endedErr, true)
@@ -232,20 +235,10 @@ func (r *recording) Stop(ctx context.Context) (audio.WavFile, error) {
 func (r *recording) Abort() error { return r.abort(nil) }
 
 func (r *recording) abort(cause error) error {
-	owner, current, endedErr := r.begin(actionAborting, cause)
+	owner, _, endedErr := r.begin(actionAborting, cause)
 	if !owner {
-		if current == actionStopping {
-			r.mu.Lock()
-			r.abortCause = cause
-			r.mu.Unlock()
-			_ = r.process.Kill()
-		}
-		select {
-		case <-r.finished:
-			return r.resultErr
-		case <-time.After(r.stopGrace + r.killWait):
-			return errs.New(errs.Timeout, "audio/pw-record", "arrêt de pw-record non confirmé")
-		}
+		_, err := r.observeFinished(context.Background(), r.stopGrace+r.killWait)
+		return err
 	}
 	if endedErr != nil {
 		cleanupErr := os.RemoveAll(r.tempDir)
@@ -327,7 +320,11 @@ func (r *recording) complete(file audio.WavFile, err error, retainFailure bool) 
 		_, cleanupErr := audio.RetainCapture(r.path, r.tempDir, r.opts.Retention)
 		err = errors.Join(err, cleanupErr)
 	} else if err != nil {
-		_ = os.RemoveAll(r.tempDir)
+		cleanupErr := os.RemoveAll(r.tempDir)
+		if cleanupErr != nil {
+			cleanupErr = errs.Wrap(errs.AudioFailed, "audio/pw-record", "impossible de supprimer la capture", cleanupErr)
+		}
+		err = errors.Join(err, cleanupErr)
 	}
 	r.mu.Lock()
 	r.result = file
@@ -336,17 +333,15 @@ func (r *recording) complete(file audio.WavFile, err error, retainFailure bool) 
 	r.mu.Unlock()
 }
 
-func (r *recording) waitFinished(ctx context.Context, timeout time.Duration) (audio.WavFile, error) {
+func (r *recording) observeFinished(ctx context.Context, timeout time.Duration) (audio.WavFile, error) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-r.finished:
 		return r.result, r.resultErr
 	case <-ctx.Done():
-		_ = r.process.Kill()
 		return audio.WavFile{}, ctx.Err()
 	case <-timer.C:
-		_ = r.process.Kill()
 		return audio.WavFile{}, errs.New(errs.Timeout, "audio/pw-record", "arrêt de pw-record non confirmé")
 	}
 }

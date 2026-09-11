@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"git.2027a.net/mathieu/murmur/internal/audio/wav"
 	"git.2027a.net/mathieu/murmur/internal/errs"
 	"git.2027a.net/mathieu/murmur/internal/xdg"
 )
@@ -109,6 +110,39 @@ func RetainCapture(path, tempDir string, options RetentionOptions) (string, erro
 	return preserveOrRemove(path, tempDir, options)
 }
 
+func preserveValidatedOrRemove(file wav.File, tempDir string, options RetentionOptions) (string, error) {
+	reader, handle, openErr := file.OpenRIFF()
+	if openErr != nil {
+		closeErr := file.Close()
+		removeErr := removeCapture(tempDir)
+		return "", errors.Join(openErr, closeErr, removeErr)
+	}
+	options, normalizeErr := options.normalized()
+	if normalizeErr != nil {
+		closeErr := handle.Close()
+		fileCloseErr := file.Close()
+		removeErr := removeCapture(tempDir)
+		return "", errors.Join(normalizeErr, closeErr, fileCloseErr, removeErr)
+	}
+	store, storeErr := xdg.OpenPrivateDir(options.storeBase, options.storePath...)
+	if storeErr != nil {
+		closeErr := handle.Close()
+		fileCloseErr := file.Close()
+		removeErr := removeCapture(tempDir)
+		return "", errors.Join(errs.Wrap(errs.AudioFailed, "audio/retention", "répertoire de diagnostic non sûr", storeErr), closeErr, fileCloseErr, removeErr)
+	}
+	name, retainErr := retainReaderInStore(reader, store, options)
+	storeCloseErr := store.Close()
+	handleCloseErr := handle.Close()
+	fileCloseErr := file.Close()
+	if retainErr != nil {
+		removeErr := removeCapture(tempDir)
+		return "", errors.Join(errs.Wrap(errs.AudioFailed, "audio/retention", "impossible de conserver la capture de diagnostic", retainErr), storeCloseErr, handleCloseErr, fileCloseErr, removeErr)
+	}
+	removeErr := removeCapture(tempDir)
+	return filepath.Join(store.Path(), name), errors.Join(storeCloseErr, handleCloseErr, fileCloseErr, removeErr)
+}
+
 func retainInStore(source string, store *xdg.PrivateDir, options RetentionOptions) (name string, err error) {
 	in, identity, err := openRetentionSource(source, options.MaxBytes)
 	if err != nil {
@@ -141,6 +175,35 @@ func retainInStore(source string, store *xdg.PrivateDir, options RetentionOption
 		return "", err
 	}
 	if err := removeRetentionSource(source, identity); err != nil {
+		return "", err
+	}
+	if err := store.Verify(); err != nil {
+		return "", err
+	}
+	keep = true
+	return name, nil
+}
+
+func retainReaderInStore(reader io.Reader, store *xdg.PrivateDir, options RetentionOptions) (name string, err error) {
+	if err := store.Lock(); err != nil {
+		return "", err
+	}
+	defer func() { err = errors.Join(err, store.Unlock()) }()
+	name, err = copyPrivate(reader, store, options.MaxBytes)
+	if err != nil {
+		return "", err
+	}
+	createdName := name
+	keep := false
+	defer func() {
+		if !keep {
+			_ = store.Remove(createdName)
+		}
+	}()
+	if err := pruneDiagnostics(store, options, name); err != nil {
+		return "", err
+	}
+	if err := store.Sync(); err != nil {
 		return "", err
 	}
 	if err := store.Verify(); err != nil {
@@ -198,7 +261,7 @@ func removeRetentionSource(path string, expected retentionSourceIdentity) error 
 	return nil
 }
 
-func copyPrivate(in *os.File, store *xdg.PrivateDir, maximum int64) (string, error) {
+func copyPrivate(in io.Reader, store *xdg.PrivateDir, maximum int64) (string, error) {
 	out, name, err := store.CreateTemp("recording-", ".wav")
 	if err != nil {
 		return "", err
