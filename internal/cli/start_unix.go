@@ -253,22 +253,6 @@ func (app App) runSession(ctx context.Context, args []string, stdout io.Writer) 
 	if err != nil {
 		return err
 	}
-	server, err := ipc.Listen(path, bootstrap, bus)
-	if err != nil {
-		return err
-	}
-	serveCtx, stopServer := context.WithCancel(context.Background())
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- server.Serve(serveCtx) }()
-	if err := json.NewEncoder(ready).Encode(bootstrapMessage{OK: true}); err != nil {
-		stopServer()
-		<-serveDone
-		return err
-	}
-	bootstrapSent = true
-	_ = ready.Close()
-	logging.Infof(logging.ComponentSession, "session démarrée")
-
 	orchestrator, err := session.Build(session.BuildOptions{
 		Context: bootstrap.Context(), Config: cfg, RuntimeDir: runtimeDir, SessionID: sessionID,
 		ClipboardOnly: snapshot.ClipboardOnly, Stdout: stdout, Bus: bus, Bootstrap: bootstrap,
@@ -284,14 +268,27 @@ func (app App) runSession(ctx context.Context, args []string, stdout io.Writer) 
 		if persistErr == nil {
 			commitErr = session.CommitLastResult(runtimeDir, result.SessionID)
 		}
-		stopServer()
-		serveErr := <-serveDone
 		if result.Result == session.Cancelled {
-			return errors.Join(journalErr, persistErr, commitErr, serveErr)
+			return errors.Join(journalErr, persistErr, commitErr)
 		}
-		return errors.Join(err, journalErr, persistErr, commitErr, serveErr)
+		return errors.Join(err, journalErr, persistErr, commitErr)
 	}
 	bootstrap.Attach(orchestrator)
+	server, err := ipc.Listen(path, bootstrap, bus)
+	if err != nil {
+		return err
+	}
+	serveCtx, stopServer := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(serveCtx) }()
+	if err := json.NewEncoder(ready).Encode(bootstrapMessage{OK: true}); err != nil {
+		stopServer()
+		<-serveDone
+		return err
+	}
+	bootstrapSent = true
+	_ = ready.Close()
+	logging.Infof(logging.ComponentSession, "session démarrée")
 
 	type runOutcome struct {
 		result     session.LastResult

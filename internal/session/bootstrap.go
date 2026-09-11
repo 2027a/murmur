@@ -41,7 +41,7 @@ func NewBootstrap(options BootstrapOptions) (*Bootstrap, error) {
 		options.Now = time.Now
 	}
 	ctx, cancel := context.WithCancel(options.Context)
-	machine := NewMachine(options.SessionID, eventPublisher{bus: options.Bus})
+	machine := NewMachine(options.SessionID, newPublicationGate(eventPublisher{bus: options.Bus}))
 	machine.now = options.Now
 	b := &Bootstrap{
 		machine: machine, ctx: ctx, cancel: cancel,
