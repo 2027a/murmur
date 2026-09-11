@@ -131,6 +131,18 @@ func TestTypeNewlineModes(t *testing.T) {
 	}
 }
 
+func TestSanitizeTextBoundedRefusesExpansionWithoutPartialOutput(t *testing.T) {
+	if got, err := SanitizeTextBounded("\n", Marker, len(newlineMarker)-1); err == nil || got != "" || errs.Classify(err) != errs.ServerError {
+		t.Fatalf("got=%q class=%q err=%v", got, errs.Classify(err), err)
+	}
+	if got, err := SanitizeTextBounded("é", Space, 2); err != nil || got != "é" {
+		t.Fatalf("got=%q err=%v", got, err)
+	}
+	if got, err := SanitizeTextBounded("é", Space, 1); err == nil || got != "" {
+		t.Fatalf("got=%q err=%v", got, err)
+	}
+}
+
 func TestSanitizeTextRemovesControlsAndPreservesUnicode(t *testing.T) {
 	input := "a\r\nb\nc\rd\te\x1bf\x00g\x7fh\u0085i\u009fjé🙂\u2028" + string([]byte{0xff})
 	tests := []struct {

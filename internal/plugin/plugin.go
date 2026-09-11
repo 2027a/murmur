@@ -3,8 +3,6 @@ package plugin
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/netip"
 	"strings"
 	"time"
 
@@ -31,30 +29,6 @@ type Local interface {
 	Transform(context.Context, string) (string, error)
 }
 
-// External is required for every non-local implementation. Network access is
-// supplied by the runtime rather than selected by the implementation.
-type External interface {
-	Definition
-	Transform(context.Context, Capability, string) (string, error)
-}
-
-// Capability exposes only HTTP requests through a netguard transport. Its
-// client and transport cannot be replaced by an external implementation.
-type Capability struct {
-	client *http.Client
-	ctx    context.Context
-}
-
-func (c Capability) Do(request *http.Request) (*http.Response, error) {
-	if c.client == nil || c.ctx == nil {
-		return nil, errs.New(errs.PolicyBlocked, "plugin", "capability HTTP absente")
-	}
-	if request == nil {
-		return nil, errs.New(errs.ConfigInvalid, "plugin", "requête HTTP absente")
-	}
-	return c.client.Do(request.Clone(c.ctx))
-}
-
 // Func adapts an embedded local function to Local. Production plugins are
 // still wrapped with New to enforce their configured timeout and policy.
 type Func func(context.Context, string) (string, error)
@@ -66,9 +40,8 @@ func (f Func) Transform(ctx context.Context, text string) (string, error) {
 }
 
 type Options struct {
-	Timeout         time.Duration
-	AllowedZones    []policy.Zone
-	TrustedNetworks []netip.Prefix
+	Timeout      time.Duration
+	AllowedZones []policy.Zone
 }
 
 type result struct {
@@ -79,8 +52,6 @@ type result struct {
 type bounded struct {
 	definition Definition
 	local      Local
-	external   External
-	capability Capability
 	timeout    time.Duration
 }
 
@@ -104,22 +75,14 @@ func New(implementation Definition, options Options) (Plugin, error) {
 		return nil, errs.New(errs.PolicyBlocked, "plugin", fmt.Sprintf("zone %s interdite par policy.plugin_zones", zone))
 	}
 	adapter := &bounded{definition: implementation, timeout: options.Timeout}
-	if zone == policy.Local {
-		local, ok := implementation.(Local)
-		if !ok {
-			return nil, errs.New(errs.ConfigInvalid, "plugin", "un plugin local doit implémenter plugin.Local")
-		}
-		adapter.local = local
-		return adapter, nil
+	if zone != policy.Local {
+		return nil, errs.New(errs.ConfigInvalid, "plugin", "seuls les plugins locaux sont pris en charge")
 	}
-	external, ok := implementation.(External)
+	local, ok := implementation.(Local)
 	if !ok {
-		return nil, errs.New(errs.ConfigInvalid, "plugin", "un plugin non local doit implémenter plugin.External")
+		return nil, errs.New(errs.ConfigInvalid, "plugin", "un plugin local doit implémenter plugin.Local")
 	}
-	adapter.external = external
-	adapter.capability = Capability{client: &http.Client{
-		Transport: policy.TransportWithTrusted(zone, options.TrustedNetworks),
-	}}
+	adapter.local = local
 	return adapter, nil
 }
 
@@ -143,13 +106,7 @@ func (p *bounded) Transform(ctx context.Context, text string) (string, error) {
 			}
 			done <- result{text: transformed, err: err}
 		}()
-		if p.local != nil {
-			transformed, err = p.local.Transform(callCtx, text)
-		} else {
-			capability := p.capability
-			capability.ctx = callCtx
-			transformed, err = p.external.Transform(callCtx, capability, text)
-		}
+		transformed, err = p.local.Transform(callCtx, text)
 	}()
 
 	select {
