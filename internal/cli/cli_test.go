@@ -32,6 +32,15 @@ import (
 	"git.2027a.net/mathieu/murmur/internal/xdg"
 )
 
+func privateCLITempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestUsageErrorsReturnTwo(t *testing.T) {
 	for _, args := range [][]string{{}, {"unknown"}, {"stop", "extra"}, {"status", "--wat"}, {"start", "--clipboard-only", "--clipboard-only"}, {"toggle", "--clipboard-only", "--clipboard-only"}, {"transcribe"}, {"cleanup", "extra"}, {"dictate", "--sink", "paste"}} {
 		var stdout, stderr bytes.Buffer
@@ -64,7 +73,7 @@ func TestDictateDefaultsToStdoutWhenSinkIsOmitted(t *testing.T) {
 }
 
 func TestDictateFileRequiresConfiguredPath(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", privateCLITempDir(t))
 	var stdout, stderr bytes.Buffer
 	code := (App{Stdin: strings.NewReader("")}).Run(
 		context.Background(), []string{"dictate", "--sink", "file", "--json"}, &stdout, &stderr,
@@ -83,7 +92,7 @@ func TestDictateFileRequiresConfiguredPath(t *testing.T) {
 }
 
 func TestCleanupDisabledPassesStdinThrough(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", privateCLITempDir(t))
 	input := "texte brut\nconservé"
 	var stdout, stderr bytes.Buffer
 	code := (App{Stdin: strings.NewReader(input)}).Run(context.Background(), []string{"cleanup", "--json"}, &stdout, &stderr)
@@ -391,7 +400,7 @@ func TestStartRejectsTransientPasteBeforeCapture(t *testing.T) {
 }
 
 func TestCleanupInputLimitIsStructured(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", privateCLITempDir(t))
 	input := strings.Repeat("x", maxCleanupInputBytes+1)
 	var stdout, stderr bytes.Buffer
 	code := (App{Stdin: strings.NewReader(input)}).Run(context.Background(), []string{"cleanup", "--json"}, &stdout, &stderr)
