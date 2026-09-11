@@ -13,6 +13,7 @@ import (
 
 type Warning struct {
 	Class     errs.Class `json:"class"`
+	Provider  string     `json:"provider,omitempty"`
 	Component string     `json:"component"`
 	Message   string     `json:"message"`
 }
@@ -55,19 +56,21 @@ type Plugin = plugin.Plugin
 type PluginFunc = plugin.Func
 
 type Options struct {
-	CommandPack string
-	STTLanguage string
-	ASCIIQuotes bool
-	Cleanup     Cleanup
-	Plugin      Plugin
+	CommandPack     string
+	STTLanguage     string
+	ASCIIQuotes     bool
+	CleanupProvider string
+	Cleanup         Cleanup
+	Plugin          Plugin
 }
 
 type Pipeline struct {
-	pack        *Pack
-	asciiQuotes bool
-	cleanup     Cleanup
-	plugin      Plugin
-	protector   *Protector
+	pack            *Pack
+	asciiQuotes     bool
+	cleanupProvider string
+	cleanup         Cleanup
+	plugin          Plugin
+	protector       *Protector
 }
 
 func New(options Options) (*Pipeline, error) {
@@ -76,11 +79,12 @@ func New(options Options) (*Pipeline, error) {
 		return nil, err
 	}
 	return &Pipeline{
-		pack:        pack,
-		asciiQuotes: options.ASCIIQuotes,
-		cleanup:     options.Cleanup,
-		plugin:      options.Plugin,
-		protector:   NewProtector(rand.Reader),
+		pack:            pack,
+		asciiQuotes:     options.ASCIIQuotes,
+		cleanupProvider: options.CleanupProvider,
+		cleanup:         options.Cleanup,
+		plugin:          options.Plugin,
+		protector:       NewProtector(rand.Reader),
 	}, nil
 }
 
@@ -107,11 +111,17 @@ func (p *Pipeline) Run(ctx context.Context, transcript string) (Result, error) {
 		}
 		switch {
 		case cleanupErr != nil:
-			warnings = append(warnings, Warning{Class: errs.Classify(cleanupErr), Component: "cleanup", Message: warningCleanupDegraded})
+			warnings = append(warnings, Warning{
+				Class: errs.Classify(cleanupErr), Provider: p.cleanupProvider, Component: "cleanup", Message: warningCleanupDegraded,
+			})
 		case candidate != "" && strings.TrimSpace(cleaned) == "":
-			warnings = append(warnings, Warning{Class: errs.EmptyResponse, Component: "cleanup", Message: warningCleanupInvalid})
+			warnings = append(warnings, Warning{
+				Class: errs.EmptyResponse, Provider: p.cleanupProvider, Component: "cleanup", Message: warningCleanupInvalid,
+			})
 		case protected.Protection.Validate(cleaned) != nil:
-			warnings = append(warnings, Warning{Class: errs.EmptyResponse, Component: "cleanup", Message: warningCleanupInvalid})
+			warnings = append(warnings, Warning{
+				Class: errs.EmptyResponse, Provider: p.cleanupProvider, Component: "cleanup", Message: warningCleanupInvalid,
+			})
 		default:
 			candidate = cleaned
 		}

@@ -55,26 +55,24 @@ func (i *Injector) Type(ctx context.Context, text string) error {
 
 func (i *Injector) typeText(ctx context.Context, text string) error {
 	text = SanitizeText(text, i.newlines)
-	if _, err := i.executor.Run(ctx, "wtype", []string{"-"}, []byte(text)); err != nil {
+	if err := sysexec.RunDiscard(ctx, i.executor, "wtype", []string{"-"}, []byte(text)); err != nil {
 		return commandError(ctx, "frappe simulée impossible", err)
 	}
 	return nil
 }
 
-// Paste tries each configured shortcut and falls back to simulated typing only
-// when every shortcut command failed technically.
+// Paste performs a single active injection attempt: the first configured
+// shortcut, or direct typing when no shortcut is configured.
 func (i *Injector) Paste(ctx context.Context, text string) error {
 	commandCtx, cancel := context.WithTimeout(ctx, delivery.CommandTimeout)
 	defer cancel()
-	for _, args := range i.shortcuts {
-		if _, err := i.executor.Run(commandCtx, "wtype", args, nil); err == nil {
-			return nil
-		}
-		if commandCtx.Err() != nil {
-			return commandError(commandCtx, "collage simulé impossible", commandCtx.Err())
-		}
+	if len(i.shortcuts) == 0 {
+		return i.typeText(commandCtx, text)
 	}
-	return i.typeText(commandCtx, text)
+	if err := sysexec.RunDiscard(commandCtx, i.executor, "wtype", i.shortcuts[0], nil); err != nil {
+		return commandError(commandCtx, "collage simulé impossible", err)
+	}
+	return nil
 }
 
 func commandError(ctx context.Context, message string, cause error) error {

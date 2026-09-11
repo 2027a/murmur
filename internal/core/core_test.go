@@ -58,8 +58,25 @@ func TestBuildProcessorPreservesCleanupHTTP503Class(t *testing.T) {
 	if result.Text != "texte" || len(result.Warnings) != 1 || result.Warnings[0].Class != errs.ServerError || result.Warnings[0].Component != "cleanup" {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Warnings[0].Provider != "cleanup" {
+		t.Fatalf("cleanup provider=%q", result.Warnings[0].Provider)
+	}
 	if strings.Contains(result.Warnings[0].Message, canary) {
 		t.Fatalf("sensitive HTTP body leaked in warning: %#v", result.Warnings[0])
+	}
+}
+
+func TestBuildCleanupPropagatesAllowInsecure(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Cleanup.Enabled = true
+	cfg.Cleanup.Provider = "cleanup"
+	cfg.Cleanup.Providers["cleanup"] = config.CleanupProviderConfig{
+		Type: "openai-compatible", BaseURL: "http://example.com/v1", Model: "test", TimeoutS: 1, Zone: "internet",
+		AllowInsecure: true,
+	}
+	cfg.Policy.CleanupZones = []string{"internet"}
+	if _, err := BuildCleanup(context.Background(), cfg, BuildOptions{}); err != nil {
+		t.Fatalf("BuildCleanup() error = %v", err)
 	}
 }
 

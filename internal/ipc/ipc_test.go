@@ -286,6 +286,69 @@ func TestSubscribeStreamsEvents(t *testing.T) {
 	}
 }
 
+func TestSubscribePreservesEventBufferedWithHandshake(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	want := events.Event{
+		Version:   1,
+		Type:      events.StateChanged,
+		Timestamp: time.Now().UTC(),
+		SessionID: "buffered",
+		State:     "recording",
+	}
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		var request Request
+		if err := json.NewDecoder(conn).Decode(&request); err != nil {
+			serverDone <- err
+			return
+		}
+		response, err := json.Marshal(Success("subscribed"))
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		event, err := json.Marshal(want)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		_, err = conn.Write(append(append(response, '\n'), append(event, '\n')...))
+		serverDone <- err
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, errorStream, err := NewClient(path).Subscribe(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-stream:
+		if got.SessionID != want.SessionID || got.State != want.State {
+			t.Fatalf("event = %#v", got)
+		}
+	case err := <-errorStream:
+		t.Fatalf("subscription error: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("buffered event timeout")
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSubscribeSurvivesServerReadTimeout(t *testing.T) {
 	bus := events.NewBus()
 	defer bus.Close()
