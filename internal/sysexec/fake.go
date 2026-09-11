@@ -28,6 +28,11 @@ func (f *FakeExecutor) Run(ctx context.Context, name string, args []string, stdi
 	return f.RunFunc(ctx, name, args, stdin)
 }
 
+func (f *FakeExecutor) RunDiscard(ctx context.Context, name string, args []string, stdin []byte) error {
+	_, err := f.Run(ctx, name, args, stdin)
+	return err
+}
+
 func (f *FakeExecutor) Start(ctx context.Context, name string, args []string) (Process, error) {
 	f.record(Call{Name: name, Args: args})
 	if f.StartFunc == nil {

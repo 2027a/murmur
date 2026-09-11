@@ -83,6 +83,13 @@ func TestOSExecutorRunLimitedBoundsHelperOutput(t *testing.T) {
 	}
 }
 
+func TestOSExecutorRunDiscardDoesNotBufferStdout(t *testing.T) {
+	err := (OSExecutor{}).RunDiscard(context.Background(), "sh", []string{"-c", "yes ignored | head -c 1048576 >/dev/stdout"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFilterEnvironmentRemovesEverySecretAssignment(t *testing.T) {
 	filtered := FilterEnvironment([]string{"TOKEN=one", "SAFE=yes", "TOKEN=two", "OTHER=x"}, []string{"TOKEN", "OTHER"})
 	if got := strings.Join(filtered, "|"); got != "SAFE=yes" {

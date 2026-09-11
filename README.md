@@ -317,10 +317,10 @@ se termine après livraison ou annulation.
 
 `sink.mode` accepte `paste`, `type`, `clipboard`, `stdout`, `file` et `auto`.
 `auto` devient le choix explicite `sink.auto_mode="paste"|"type"`, indépendamment
-du profil de données. `paste`
-copie puis essaie les raccourcis configurés avec `wtype`; si leur émission
-échoue, il retombe sur la frappe. Avec `clipboard_mode="none"`, il frappe
-directement et ne colle jamais un ancien presse-papiers.
+du profil de données. `paste` copie puis émet uniquement le premier raccourci
+configuré avec `wtype`. Si la liste de raccourcis est vide, ou avec
+`clipboard_mode="none"`, il frappe directement et ne colle jamais un ancien
+presse-papiers.
 
 Le texte provider est filtré à la frontière des modes actifs `paste` et `type`,
 avant leur `wl-copy` et leur `wtype`: le défaut `type_newlines="space"` ne laisse
@@ -352,8 +352,8 @@ Pour une exécution sans intégration desktop, configurer `sink.mode="stdout"`,
 `sink.clipboard_mode="none"` et `ui.mode="none"`, ou utiliser les commandes
 composables.
 
-Chaque copie, frappe, clear ou cascade complète de collage est bornée à 5
-secondes. Le budget est une constante de sûreté, pas une option de
+Chaque copie, frappe, clear ou tentative de collage est bornée à 5 secondes. Le
+budget est une constante de sûreté, pas une option de
 configuration. Un `wl-copy` ou `wtype` bloqué voit son groupe de processus tué et
 récolté; la session rend `failed/sink_failed`, libère verrou et socket, puis une
 nouvelle session peut démarrer.
