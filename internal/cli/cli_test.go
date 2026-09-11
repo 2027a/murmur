@@ -516,7 +516,8 @@ func TestComposablePipelineWarningsPreserveClassesWithoutSensitiveErrors(t *test
 				t.Fatal(err)
 			}
 			pipeline, err := textpipe.New(textpipe.Options{
-				CommandPack: "fr",
+				CommandPack:     "fr",
+				CleanupProvider: "cleanup",
 				Cleanup: textpipe.CleanupFunc(func(context.Context, string, textpipe.Protection) (string, error) {
 					return "", errs.Wrap(class, "unsafe/"+canary, "unsafe "+canary, errors.New("cause "+canary))
 				}),
@@ -530,7 +531,8 @@ func TestComposablePipelineWarningsPreserveClassesWithoutSensitiveErrors(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(result.Warnings) != 1 || result.Warnings[0].Class != class || result.Warnings[0].Component != "cleanup" {
+			if len(result.Warnings) != 1 || result.Warnings[0].Class != class ||
+				result.Warnings[0].Provider != "cleanup" || result.Warnings[0].Component != "cleanup" {
 				t.Fatalf("warnings=%#v", result.Warnings)
 			}
 			encoded, err := json.Marshal(result)
@@ -549,7 +551,8 @@ func TestComposablePipelineWarningsPreserveClassesWithoutSensitiveErrors(t *test
 				} else if err != nil {
 					t.Fatal(err)
 				}
-				degraded = degraded || event.Type == events.Degraded && event.ErrorClass == class && event.Component == "cleanup"
+				degraded = degraded || event.Type == events.Degraded && event.Provider == "cleanup" &&
+					event.ErrorClass == class && event.Component == "cleanup"
 			}
 			if !degraded {
 				t.Fatalf("classified degraded event missing from %s", class)

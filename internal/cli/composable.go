@@ -522,10 +522,14 @@ func executeTranscriptionWith(ctx context.Context, cfg config.Config, path strin
 	}
 	result.TranscriptFinal = processed.Text
 	for _, warning := range processed.Warnings {
+		provider := warning.Provider
+		if provider == "" {
+			provider = result.Provider
+		}
 		result.Warnings = append(result.Warnings, commandWarning{
-			Class: warning.Class, Provider: result.Provider, Component: warning.Component, Message: warning.Message,
+			Class: warning.Class, Provider: provider, Component: warning.Component, Message: warning.Message,
 		})
-		emitter.emit(events.Degraded, "processing", result.Provider, warning.Class, warning.Component, 0, 0, "")
+		emitter.emit(events.Degraded, "processing", provider, warning.Class, warning.Component, 0, 0, "")
 	}
 	if strings.TrimSpace(result.TranscriptFinal) == "" {
 		return result, errs.New(errs.NoSpeech, "text-pipeline", "le pipeline n'a produit aucun texte")

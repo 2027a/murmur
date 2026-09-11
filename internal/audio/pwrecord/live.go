@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"git.2027a.net/mathieu/murmur/internal/audio"
+	"git.2027a.net/mathieu/murmur/internal/audio/wav"
 	"git.2027a.net/mathieu/murmur/internal/errs"
 )
 
@@ -20,6 +21,8 @@ type liveRecording struct {
 	recording audio.Recording
 	segmenter *audio.GrowingSegmenter
 	tempDir   string
+	path      string
+	live      audio.LiveOptions
 
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -30,13 +33,13 @@ type liveRecording struct {
 	stopped chan liveCaptureResult
 	done    chan struct{}
 
-	mu       sync.Mutex
-	final    audio.WavFile
-	runErr   error
-	stopOnce sync.Once
-	cleanup  sync.Once
-	kept     string
-	cleanErr error
+	mu         sync.Mutex
+	final      audio.WavFile
+	runErr     error
+	actionOnce sync.Once
+	cleanup    sync.Once
+	kept       string
+	cleanErr   error
 }
 
 func (r *Recorder) StartLive(ctx context.Context, opts audio.RecordOptions, live audio.LiveOptions) (audio.LiveRecording, error) {
@@ -67,15 +70,8 @@ func (r *Recorder) StartLive(ctx context.Context, opts audio.RecordOptions, live
 		_ = os.RemoveAll(tempDir)
 		return nil, errs.New(errs.Internal, "audio/pw-record", "capture pw-record live incohérente")
 	}
-	segmenter, err := audio.NewGrowingSegmenter(concrete.path, tempDir, live)
-	if err != nil {
-		cancel()
-		_ = child.Abort()
-		_ = os.RemoveAll(tempDir)
-		return nil, err
-	}
 	recording := &liveRecording{
-		recording: child, segmenter: segmenter, tempDir: tempDir,
+		recording: child, tempDir: tempDir, path: concrete.path, live: live,
 		ctx: liveCtx, cancel: cancel, ready: make(chan error, 1),
 		parts: make(chan audio.LiveSegment, 2), errors: make(chan error, 1),
 		stop: make(chan struct{}), stopped: make(chan liveCaptureResult), done: make(chan struct{}),
@@ -122,6 +118,12 @@ func (r *liveRecording) run(interval time.Duration) {
 		r.finish(r.ctx.Err())
 		return
 	}
+	if err := r.initSegmenter(); err != nil {
+		r.publishReady(err)
+		_ = r.recording.Abort()
+		r.finish(err)
+		return
+	}
 	r.publishReady(nil)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -157,17 +159,37 @@ func (r *liveRecording) run(interval time.Duration) {
 	}
 }
 
+func (r *liveRecording) initSegmenter() error {
+	if r.segmenter != nil {
+		return nil
+	}
+	source, err := wav.OpenGrowing(r.path)
+	if err != nil {
+		return err
+	}
+	segmenter, err := audio.NewGrowingSegmenterFromFile(source, r.path, r.tempDir, r.live)
+	if err != nil {
+		_ = source.Close()
+		return err
+	}
+	r.segmenter = segmenter
+	return nil
+}
+
 func (r *liveRecording) finalize(result liveCaptureResult) error {
 	if result.err != nil {
 		return result.err
 	}
+	if err := r.initSegmenter(); err != nil {
+		return errors.Join(err, result.file.File.Close())
+	}
+	segments, err := r.segmenter.Finalize(result.file.File)
+	if err != nil {
+		return errors.Join(err, result.file.File.Close())
+	}
 	r.mu.Lock()
 	r.final = result.file
 	r.mu.Unlock()
-	segments, err := r.segmenter.Finalize(result.file.File)
-	if err != nil {
-		return err
-	}
 	return r.emit(segments)
 }
 
@@ -205,7 +227,7 @@ func (r *liveRecording) Stop(ctx context.Context) error {
 	default:
 	}
 	owner := false
-	r.stopOnce.Do(func() {
+	r.actionOnce.Do(func() {
 		owner = true
 		close(r.stop)
 		go func() {
@@ -234,13 +256,21 @@ func (r *liveRecording) Stop(ctx context.Context) error {
 }
 
 func (r *liveRecording) Abort() error {
-	r.cancel()
+	owner := false
+	r.actionOnce.Do(func() {
+		owner = true
+		r.cancel()
+	})
+	if !owner {
+		<-r.done
+		return r.result()
+	}
 	<-r.done
 	r.cleanup.Do(func() {
 		r.mu.Lock()
 		final := r.final
 		r.mu.Unlock()
-		r.cleanErr = errors.Join(r.segmenter.Close(), final.File.Close(), os.RemoveAll(r.tempDir))
+		r.cleanErr = errors.Join(r.closeSegmenter(), final.File.Close(), os.RemoveAll(r.tempDir))
 	})
 	if err := r.result(); err != nil && !errors.Is(err, context.Canceled) {
 		return errors.Join(err, r.cleanErr)
@@ -253,7 +283,7 @@ func (r *liveRecording) Release() (string, error) {
 		r.mu.Lock()
 		final := r.final
 		r.mu.Unlock()
-		segmentErr := r.segmenter.Close()
+		segmentErr := r.closeSegmenter()
 		if final.Path() == "" {
 			r.cleanErr = errors.Join(segmentErr, os.RemoveAll(r.tempDir))
 			return
@@ -263,6 +293,13 @@ func (r *liveRecording) Release() (string, error) {
 		r.cleanErr = errors.Join(segmentErr, err, os.RemoveAll(r.tempDir))
 	})
 	return r.kept, r.cleanErr
+}
+
+func (r *liveRecording) closeSegmenter() error {
+	if r.segmenter == nil {
+		return nil
+	}
+	return r.segmenter.Close()
 }
 
 func (r *liveRecording) result() error {

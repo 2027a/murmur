@@ -59,7 +59,7 @@ func (c *Clipboard) Clear(ctx context.Context) error {
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, delivery.CommandTimeout)
 	defer cancel()
-	if _, err := c.executor.Run(commandCtx, "wl-copy", []string{"--clear"}, nil); err != nil {
+	if err := sysexec.RunDiscard(commandCtx, c.executor, "wl-copy", []string{"--clear"}, nil); err != nil {
 		return commandError(commandCtx, "effacement du presse-papiers impossible", err)
 	}
 	return nil
@@ -68,7 +68,7 @@ func (c *Clipboard) Clear(ctx context.Context) error {
 func (c *Clipboard) copy(ctx context.Context, text string) error {
 	commandCtx, cancel := context.WithTimeout(ctx, delivery.CommandTimeout)
 	defer cancel()
-	if _, err := c.executor.Run(commandCtx, "wl-copy", nil, []byte(text)); err != nil {
+	if err := sysexec.RunDiscard(commandCtx, c.executor, "wl-copy", nil, []byte(text)); err != nil {
 		return commandError(commandCtx, "écriture du presse-papiers impossible", err)
 	}
 	return nil

@@ -289,6 +289,124 @@ func TestStopExitRaceUsesAtomicWinner(t *testing.T) {
 	}
 }
 
+func TestAbortConcurrentWithStopOnlyObservesOwner(t *testing.T) {
+	root := t.TempDir()
+	var path string
+	signaled := make(chan struct{})
+	release := make(chan struct{})
+	process := sysexec.NewFakeProcess()
+	process.SignalFunc = func(os.Signal) error {
+		writeWAV(t, path, 200*time.Millisecond)
+		close(signaled)
+		<-release
+		process.Exit(nil)
+		return nil
+	}
+	executor := &sysexec.FakeExecutor{StartFunc: func(_ context.Context, _ string, args []string) (sysexec.Process, error) {
+		path = args[len(args)-1]
+		writeWAV(t, path, 200*time.Millisecond)
+		return process, nil
+	}}
+	recording, err := New(executor).Start(context.Background(), audio.RecordOptions{
+		Directory: root, ReadinessInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := receiveReady(t, recording.Ready()); err != nil {
+		t.Fatal(err)
+	}
+	stopped := make(chan error, 1)
+	go func() {
+		file, err := recording.Stop(context.Background())
+		if file.Path() != "" {
+			_, err = file.Release()
+		}
+		stopped <- err
+	}()
+	select {
+	case <-signaled:
+	case <-time.After(time.Second):
+		t.Fatal("Stop propriétaire non démarré")
+	}
+	aborted := make(chan error, 1)
+	go func() { aborted <- recording.Abort() }()
+	select {
+	case err := <-aborted:
+		t.Fatalf("Abort waiter terminé avant le propriétaire: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if process.KillCount() != 0 {
+		t.Fatalf("Abort waiter a tué le processus: kills=%d", process.KillCount())
+	}
+	close(release)
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-aborted; err != nil {
+		t.Fatal(err)
+	}
+	if signals := process.Signals(); len(signals) != 1 || signals[0] != os.Interrupt {
+		t.Fatalf("signaux=%v", signals)
+	}
+	waitEmpty(t, root)
+}
+
+func TestCanceledStopWaiterDoesNotKillOwner(t *testing.T) {
+	root := t.TempDir()
+	var path string
+	signaled := make(chan struct{})
+	release := make(chan struct{})
+	process := sysexec.NewFakeProcess()
+	process.SignalFunc = func(os.Signal) error {
+		writeWAV(t, path, 200*time.Millisecond)
+		close(signaled)
+		<-release
+		process.Exit(nil)
+		return nil
+	}
+	executor := &sysexec.FakeExecutor{StartFunc: func(_ context.Context, _ string, args []string) (sysexec.Process, error) {
+		path = args[len(args)-1]
+		writeWAV(t, path, 200*time.Millisecond)
+		return process, nil
+	}}
+	recording, err := New(executor).Start(context.Background(), audio.RecordOptions{
+		Directory: root, ReadinessInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := receiveReady(t, recording.Ready()); err != nil {
+		t.Fatal(err)
+	}
+	stopped := make(chan error, 1)
+	go func() {
+		file, err := recording.Stop(context.Background())
+		if file.Path() != "" {
+			_, err = file.Release()
+		}
+		stopped <- err
+	}()
+	select {
+	case <-signaled:
+	case <-time.After(time.Second):
+		t.Fatal("Stop propriétaire non démarré")
+	}
+	waiterCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := recording.Stop(waiterCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stop waiter=%v", err)
+	}
+	if process.KillCount() != 0 {
+		t.Fatalf("Stop waiter a tué le processus: kills=%d", process.KillCount())
+	}
+	close(release)
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	waitEmpty(t, root)
+}
+
 func TestReadinessTimeoutKillsProcess(t *testing.T) {
 	root := t.TempDir()
 	process := sysexec.NewFakeProcess()
@@ -453,11 +571,14 @@ func TestLiveSingleProcessGrowingWAVHasExactPCMAndMergesTail(t *testing.T) {
 	}
 	executor := &sysexec.FakeExecutor{StartFunc: func(_ context.Context, _ string, args []string) (sysexec.Process, error) {
 		path = args[len(args)-1]
-		if err := wav.CreateGrowing(path); err != nil {
-			return nil, err
-		}
 		go func() {
 			defer close(produced)
+			// A real pw-record returns from Start before creating its output.
+			time.Sleep(5 * time.Millisecond)
+			if err := wav.CreateGrowing(path); err != nil {
+				t.Errorf("create growing WAV: %v", err)
+				return
+			}
 			for start := 0; start < totalSamples; start += stepSamples {
 				count := stepSamples
 				if start+count > totalSamples {
