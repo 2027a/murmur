@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"sync"
 	"time"
 
@@ -34,13 +33,14 @@ type OSDPayload struct {
 }
 
 type OSDOptions struct {
-	Helper           string
-	Args             []string
-	Buffer           int
-	MaxRestarts      int
-	CloseTimeout     time.Duration
-	IdleCloseTimeout time.Duration
-	Warn             WarnFunc
+	Helper            string
+	Args              []string
+	Buffer            int
+	MaxRestarts       int
+	CloseTimeout      time.Duration
+	ErrorCloseTimeout time.Duration
+	IdleCloseTimeout  time.Duration
+	Warn              WarnFunc
 }
 
 type OSD struct {
@@ -75,6 +75,9 @@ func NewOSD(executor sysexec.Executor, options OSDOptions) *OSD {
 	}
 	if options.CloseTimeout <= 0 {
 		options.CloseTimeout = DefaultOSDCloseTimeout
+	}
+	if options.ErrorCloseTimeout <= 0 {
+		options.ErrorCloseTimeout = options.CloseTimeout
 	}
 	if options.IdleCloseTimeout <= 0 {
 		options.IdleCloseTimeout = DefaultOSDIdleCloseTimeout
@@ -138,6 +141,9 @@ func (u *OSD) Close() {
 		timeout := u.options.IdleCloseTimeout
 		if u.terminal != nil {
 			timeout = u.options.CloseTimeout
+			if u.terminal.Result == "failed" {
+				timeout = u.options.ErrorCloseTimeout
+			}
 		}
 		u.closeDeadline = time.Now().Add(timeout)
 		u.mu.Unlock()
@@ -167,6 +173,11 @@ func (u *OSD) run() {
 			u.shutdown(processDone)
 			return
 		case err := <-processDone:
+			// The leader may exit while descendants remain in its process group.
+			// Reap that owned group before dropping the handle or restarting.
+			if proc := u.currentProcess(); proc != nil {
+				_ = proc.Kill()
+			}
 			u.clearProcess()
 			processDone = nil
 			if err != nil {
@@ -229,16 +240,12 @@ func (u *OSD) isClosed() bool {
 }
 
 func writeOSDPayload(proc sysexec.Process, payload OSDPayload) error {
-	stdin, ok := proc.(sysexec.InputProcess)
-	if !ok {
-		return errors.New("helper sans entree standard")
-	}
 	line, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	line = append(line, '\n')
-	_, err = stdin.Stdin().Write(line)
+	_, err = proc.Stdin().Write(line)
 	return err
 }
 
@@ -321,11 +328,7 @@ func (u *OSD) shutdown(processDone <-chan error) {
 	if proc == nil {
 		return
 	}
-	if stdin, ok := proc.(sysexec.InputProcess); ok {
-		_ = stdin.Stdin().Close()
-	} else {
-		_ = proc.Kill()
-	}
+	_ = proc.Stdin().Close()
 	if processDone != nil {
 		<-processDone
 	}
@@ -356,9 +359,7 @@ func (u *OSD) killProcess() {
 	u.proc = nil
 	u.mu.Unlock()
 	if proc != nil {
-		if stdin, ok := proc.(interface{ Stdin() io.WriteCloser }); ok {
-			_ = stdin.Stdin().Close()
-		}
+		_ = proc.Stdin().Close()
 		_ = proc.Kill()
 	}
 }

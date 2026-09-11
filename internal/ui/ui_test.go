@@ -29,22 +29,40 @@ type notifyCall struct {
 }
 
 type fakeNotificationClient struct {
-	mu     sync.Mutex
-	calls  []notifyCall
-	called chan struct{}
-	err    error
+	mu                sync.Mutex
+	calls             []notifyCall
+	called            chan struct{}
+	err               error
+	notifyErrs        []error
+	closedIDs         []uint32
+	closeNotification func(context.Context, uint32) error
 }
 
 func (f *fakeNotificationClient) Notify(_ context.Context, replaces uint32, value Notification) (uint32, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, notifyCall{replaces: replaces, value: value})
 	id := uint32(40 + len(f.calls))
+	err := f.err
+	if len(f.notifyErrs) >= len(f.calls) {
+		err = f.notifyErrs[len(f.calls)-1]
+	}
 	f.mu.Unlock()
 	select {
 	case f.called <- struct{}{}:
 	default:
 	}
-	return id, f.err
+	return id, err
+}
+
+func (f *fakeNotificationClient) CloseNotification(ctx context.Context, id uint32) error {
+	f.mu.Lock()
+	f.closedIDs = append(f.closedIDs, id)
+	closeNotification := f.closeNotification
+	f.mu.Unlock()
+	if closeNotification != nil {
+		return closeNotification(ctx, id)
+	}
+	return nil
 }
 
 func (f *fakeNotificationClient) Close() error { return nil }
@@ -53,6 +71,12 @@ func (f *fakeNotificationClient) Calls() []notifyCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]notifyCall(nil), f.calls...)
+}
+
+func (f *fakeNotificationClient) ClosedIDs() []uint32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]uint32(nil), f.closedIDs...)
 }
 
 func TestNotifyReplacesPreviousNotification(t *testing.T) {
@@ -82,6 +106,57 @@ func TestNotifyFailureIsBestEffort(t *testing.T) {
 	notify.Show(event(events.CaptureReady, "recording"))
 	waitSignal(t, client.called)
 	notify.Close()
+}
+
+func TestNotifyCloseRetractsLastNonTerminalWhenTerminalFails(t *testing.T) {
+	client := &fakeNotificationClient{
+		called:     make(chan struct{}, 2),
+		notifyErrs: []error{nil, errors.New("terminal rejected")},
+	}
+	notify := NewNotify(client, func(string, ...any) {})
+	notify.Show(event(events.CaptureReady, "recording"))
+	waitSignal(t, client.called)
+	terminal := event(events.Terminal, "")
+	terminal.Result = "failed"
+	notify.Show(terminal)
+	waitSignal(t, client.called)
+	notify.Close()
+	if got := client.ClosedIDs(); len(got) != 1 || got[0] != 41 {
+		t.Fatalf("closed IDs = %#v", got)
+	}
+}
+
+func TestNotifyCloseKeepsAcceptedTerminal(t *testing.T) {
+	client := &fakeNotificationClient{called: make(chan struct{}, 2)}
+	notify := NewNotify(client, func(string, ...any) {})
+	notify.Show(event(events.CaptureReady, "recording"))
+	waitSignal(t, client.called)
+	terminal := event(events.Terminal, "")
+	terminal.Result = "completed"
+	notify.Show(terminal)
+	waitSignal(t, client.called)
+	notify.Close()
+	if got := client.ClosedIDs(); len(got) != 0 {
+		t.Fatalf("closed IDs = %#v", got)
+	}
+}
+
+func TestNotifyCloseRetractionIsBounded(t *testing.T) {
+	client := &fakeNotificationClient{
+		called: make(chan struct{}, 1),
+		closeNotification: func(ctx context.Context, _ uint32) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+	notify := newNotify(client, func(string, ...any) {}, 20*time.Millisecond, 40*time.Millisecond)
+	notify.Show(event(events.CaptureReady, "recording"))
+	waitSignal(t, client.called)
+	t0 := time.Now()
+	notify.Close()
+	if elapsed := time.Since(t0); elapsed >= 150*time.Millisecond {
+		t.Fatalf("Close blocked for %s", elapsed)
+	}
 }
 
 func TestUIOutagesUseClosedOperationalMessages(t *testing.T) {
@@ -161,6 +236,8 @@ func (c *drainingNotificationClient) Notify(ctx context.Context, _ uint32, value
 	return 0, ctx.Err()
 }
 
+func (c *drainingNotificationClient) CloseNotification(context.Context, uint32) error { return nil }
+
 func (c *drainingNotificationClient) Close() error {
 	c.closeOnce.Do(func() { close(c.closed) })
 	return nil
@@ -231,6 +308,39 @@ func TestNotifyTerminalCloseStopsAtBudget(t *testing.T) {
 	waitSignal(t, client.closed)
 }
 
+type failingTerminalNotificationClient struct {
+	called chan struct{}
+	closed chan struct{}
+}
+
+func (c *failingTerminalNotificationClient) Notify(context.Context, uint32, Notification) (uint32, error) {
+	close(c.called)
+	return 0, errors.New("no terminal notification")
+}
+
+func (c *failingTerminalNotificationClient) CloseNotification(context.Context, uint32) error {
+	return nil
+}
+
+func (c *failingTerminalNotificationClient) Close() error {
+	close(c.closed)
+	return nil
+}
+
+func TestNotifyTerminalFailureIsBestEffortAndBounded(t *testing.T) {
+	client := &failingTerminalNotificationClient{
+		called: make(chan struct{}),
+		closed: make(chan struct{}),
+	}
+	notify := newNotify(client, func(string, ...any) {}, time.Second, 20*time.Millisecond)
+	terminal := event(events.Terminal, "idle")
+	terminal.Result = "completed"
+	notify.Show(terminal)
+	notify.Close()
+	waitSignal(t, client.called)
+	waitSignal(t, client.closed)
+}
+
 func TestTerminalCancellationAndNoSpeechAreNotFailureNotifications(t *testing.T) {
 	for _, result := range []struct {
 		name  string
@@ -298,6 +408,8 @@ type inputProcess struct {
 	killed   chan struct{}
 	waited   chan struct{}
 	waitOnce sync.Once
+	waitMu   sync.Mutex
+	waits    int
 }
 
 func newInputProcess() *inputProcess {
@@ -312,6 +424,9 @@ func newInputProcess() *inputProcess {
 func (p *inputProcess) Stdin() io.WriteCloser  { return p.stdin }
 func (p *inputProcess) Signal(os.Signal) error { return nil }
 func (p *inputProcess) Wait() error {
+	p.waitMu.Lock()
+	p.waits++
+	p.waitMu.Unlock()
 	<-p.done
 	p.waitOnce.Do(func() { close(p.waited) })
 	return errors.New("helper exited")
@@ -327,6 +442,11 @@ func (p *inputProcess) Kill() error {
 func (p *inputProcess) Exit() {
 	p.stdin.Close()
 	p.once.Do(func() { close(p.done) })
+}
+func (p *inputProcess) WaitCount() int {
+	p.waitMu.Lock()
+	defer p.waitMu.Unlock()
+	return p.waits
 }
 
 type recordingInput struct {
@@ -403,10 +523,14 @@ func TestOSDJSONLRestartAndClose(t *testing.T) {
 	}
 
 	first.Exit()
+	waitSignal(t, first.killed)
 	waitSignal(t, second.stdin.wrote)
 	osd.Close()
 	waitSignal(t, second.killed)
 	waitSignal(t, second.waited)
+	if first.WaitCount() != 1 || second.WaitCount() != 1 {
+		t.Fatalf("wait counts = first:%d second:%d, want exactly once", first.WaitCount(), second.WaitCount())
+	}
 }
 
 func TestOSDCloseWritesTerminalThenWaitsForHelper(t *testing.T) {
@@ -443,6 +567,9 @@ func TestOSDCloseWritesTerminalThenWaitsForHelper(t *testing.T) {
 	process.Exit()
 	waitSignal(t, closed)
 	waitSignal(t, process.waited)
+	if process.WaitCount() != 1 {
+		t.Fatalf("wait count = %d, want exactly once", process.WaitCount())
+	}
 	if calls := executor.Calls(); len(calls) != 1 {
 		t.Fatalf("start calls = %d, want 1", len(calls))
 	}
@@ -561,9 +688,13 @@ func TestOSDTerminalCloseKillsAndReapsAtBudget(t *testing.T) {
 	executor := &sysexec.FakeExecutor{StartFunc: func(context.Context, string, []string) (sysexec.Process, error) {
 		return process, nil
 	}}
-	osd := NewOSD(executor, OSDOptions{CloseTimeout: 20 * time.Millisecond, Warn: func(string, ...any) {}})
+	osd := NewOSD(executor, OSDOptions{
+		CloseTimeout: 200 * time.Millisecond, ErrorCloseTimeout: 20 * time.Millisecond,
+		Warn: func(string, ...any) {},
+	})
 	terminal := event(events.Terminal, "idle")
 	terminal.Result = "failed"
+	t0 := time.Now()
 	osd.Show(terminal)
 	closed := make(chan struct{})
 	go func() {
@@ -575,6 +706,9 @@ func TestOSDTerminalCloseKillsAndReapsAtBudget(t *testing.T) {
 	waitSignal(t, process.killed)
 	waitSignal(t, closed)
 	waitSignal(t, process.waited)
+	if elapsed := time.Since(t0); elapsed >= 150*time.Millisecond {
+		t.Fatalf("error terminal used success timeout: %s", elapsed)
+	}
 }
 
 type blockingInput struct {
@@ -704,6 +838,38 @@ func TestSoundPlaysWhenActiveCaptureIsCancelled(t *testing.T) {
 	if calls := executor.Calls(); len(calls) != 2 {
 		t.Fatalf("sound calls = %#v", calls)
 	}
+}
+
+func TestSoundPlaybackFallbacksUseShortIndependentBudgets(t *testing.T) {
+	type budget struct {
+		name      string
+		remaining time.Duration
+	}
+	budgets := make(chan budget, 3)
+	executor := &sysexec.FakeExecutor{RunFunc: func(ctx context.Context, name string, _ []string, _ []byte) ([]byte, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatalf("%s called without deadline", name)
+		}
+		budgets <- budget{name: name, remaining: time.Until(deadline)}
+		return nil, errors.New("missing")
+	}}
+	sound := NewSound(NewNone(), executor, "/sound.oga", func(string, ...any) {})
+	sound.Play()
+	for _, name := range []string{"pw-play", "paplay", "canberra-gtk-play"} {
+		select {
+		case got := <-budgets:
+			if got.name != name {
+				t.Fatalf("player = %s, want %s", got.name, name)
+			}
+			if got.remaining <= 0 || got.remaining > soundPlaybackTimeout {
+				t.Fatalf("%s budget = %s", name, got.remaining)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timeout waiting for %s", name)
+		}
+	}
+	sound.Close()
 }
 
 func waitSignal(t *testing.T, signal <-chan struct{}) {
