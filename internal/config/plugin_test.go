@@ -15,25 +15,26 @@ func TestPluginConfigurationDefaultsAndValidation(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		edit func(*Config)
-		want string
+		name  string
+		edit  func(*Config)
+		class errs.Class
+		want  string
 	}{
-		{"unknown mode", func(cfg *Config) { cfg.Plugin.Mode = "html" }, "plugin.mode"},
-		{"zero timeout", func(cfg *Config) { cfg.Plugin.TimeoutS = 0 }, "plugin.timeout_s"},
+		{"unknown mode", func(cfg *Config) { cfg.Plugin.Mode = "html" }, errs.ConfigInvalid, "plugin.mode"},
+		{"zero timeout", func(cfg *Config) { cfg.Plugin.TimeoutS = 0 }, errs.ConfigInvalid, "plugin.timeout_s"},
 		{"forbidden zone", func(cfg *Config) {
 			cfg.Plugin.Enabled = true
 			cfg.Plugin.Mode = "markdown"
 			cfg.Policy.PluginZones = []string{"lan"}
-		}, "policy.plugin_zones"},
-		{"unknown zone", func(cfg *Config) { cfg.Policy.PluginZones = []string{"remote"} }, "zone invalide"},
+		}, errs.PolicyBlocked, "policy.plugin_zones"},
+		{"unknown zone", func(cfg *Config) { cfg.Policy.PluginZones = []string{"remote"} }, errs.ConfigInvalid, "zone invalide"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := Defaults()
 			test.edit(&cfg)
 			err := Validate(cfg)
-			if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), test.want) {
+			if errs.Classify(err) != test.class || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Validate() error = %v, want %q", err, test.want)
 			}
 		})

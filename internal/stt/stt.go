@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -379,7 +380,7 @@ func (c *Chain) finishMixedStream(ctx context.Context, segments []Segment, prima
 		warnings = append(warnings, partialWarning(c.fallback, fallbackErr))
 	}
 	if len(primary) == 0 {
-		return MultiResult{}, errs.New(errs.EmptyResponse, "stt", "aucun segment n'a produit de transcription")
+		return MultiResult{}, failedAttempts(c.primary, c.fallback, primaryErr, fallbackErr)
 	}
 	return assemble(orderedResults(primary), len(segments), warnings), nil
 }
@@ -461,10 +462,6 @@ consume:
 	if err := ctx.Err(); err != nil {
 		return segments, nil, err
 	}
-	_, err := validateSegments(segments)
-	if err != nil {
-		return segments, results, err
-	}
 	return segments, results, firstErr
 }
 
@@ -506,14 +503,7 @@ func orderedResults(results map[int]SegmentResult) []SegmentResult {
 	for _, result := range results {
 		ordered = append(ordered, result)
 	}
-	for i := 1; i < len(ordered); i++ {
-		current := ordered[i]
-		j := i - 1
-		for ; j >= 0 && ordered[j].Index > current.Index; j-- {
-			ordered[j+1] = ordered[j]
-		}
-		ordered[j+1] = current
-	}
+	sortSegmentResults(ordered)
 	return ordered
 }
 
@@ -525,6 +515,7 @@ func (c *Chain) transcribeMixed(ctx context.Context, segments []Segment, progres
 	var partialErr error
 	var warnings []Warning
 	fallbackUsed := false
+	var firstPrimaryErr, firstFallbackErr error
 	for _, segment := range segments {
 		failedProvider := c.primary
 		outcome := transcribeOne(ctx, c.primary, segment, progress, budget)
@@ -532,13 +523,20 @@ func (c *Chain) transcribeMixed(ctx context.Context, segments []Segment, progres
 		if isTranscriptLimitError(err) {
 			return MultiResult{}, err
 		}
+		var primaryErr error
 		if err != nil && c.fallback != nil && errs.Classify(err) != errs.Cancelled {
-			primaryErr := err
+			primaryErr = err
+			if firstPrimaryErr == nil {
+				firstPrimaryErr = primaryErr
+			}
 			failedProvider = c.fallback
 			outcome = transcribeOne(ctx, c.fallback, segment, progress, budget)
 			err = outcome.err
 			if isTranscriptLimitError(err) {
 				return MultiResult{}, err
+			}
+			if err != nil && firstFallbackErr == nil {
+				firstFallbackErr = err
 			}
 			if err == nil && !fallbackUsed {
 				warnings = append(warnings, fallbackWarning(c.primary, primaryErr))
@@ -549,7 +547,10 @@ func (c *Chain) transcribeMixed(ctx context.Context, segments []Segment, progres
 		}
 		if err != nil {
 			if errs.Classify(err) == errs.Cancelled || !c.options.AllowPartial {
-				return MultiResult{}, failedAttempt(c.primary, err)
+				if primaryErr != nil && c.fallback != nil {
+					return MultiResult{}, failedAttempts(c.primary, c.fallback, primaryErr, err)
+				}
+				return MultiResult{}, failedAttempt(failedProvider, err)
 			}
 			partial = true
 			if partialErr == nil {
@@ -562,6 +563,12 @@ func (c *Chain) transcribeMixed(ctx context.Context, segments []Segment, progres
 		results = append(results, outcome.result)
 	}
 	if len(results) == 0 {
+		if firstPrimaryErr != nil && firstFallbackErr != nil {
+			return MultiResult{}, failedAttempts(c.primary, c.fallback, firstPrimaryErr, firstFallbackErr)
+		}
+		if partialErr != nil && partialProvider != nil {
+			return MultiResult{}, failedAttempt(partialProvider, partialErr)
+		}
 		return MultiResult{}, errs.New(errs.EmptyResponse, "stt", "aucun segment n'a produit de transcription")
 	}
 	if len(providers) > 1 {
@@ -615,20 +622,21 @@ func validateSegments(segments []Segment) ([]Segment, error) {
 			return nil, errs.New(errs.ConfigInvalid, "stt", fmt.Sprintf("index de segment négatif: %d", segment.Index))
 		}
 	}
-	for i := 1; i < len(ordered); i++ {
-		current := ordered[i]
-		j := i - 1
-		for ; j >= 0 && ordered[j].Index > current.Index; j-- {
-			ordered[j+1] = ordered[j]
-		}
-		ordered[j+1] = current
-	}
+	sortSegments(ordered)
 	for i := 1; i < len(ordered); i++ {
 		if ordered[i-1].Index == ordered[i].Index {
 			return nil, errs.New(errs.ConfigInvalid, "stt", fmt.Sprintf("index de segment dupliqué: %d", ordered[i].Index))
 		}
 	}
 	return ordered, nil
+}
+
+func sortSegments(segments []Segment) {
+	sort.Slice(segments, func(i, j int) bool { return segments[i].Index < segments[j].Index })
+}
+
+func sortSegmentResults(results []SegmentResult) {
+	sort.Slice(results, func(i, j int) bool { return results[i].Index < results[j].Index })
 }
 
 func assemble(results []SegmentResult, total int, warnings []Warning) MultiResult {
@@ -672,24 +680,28 @@ func partialWarning(provider Provider, err error) Warning {
 
 type providerAttemptsError struct {
 	effective string
+	class     errs.Class
 	causes    []error
 }
 
-func (e *providerAttemptsError) Error() string   { return "échec d'un ou plusieurs providers STT" }
-func (e *providerAttemptsError) Unwrap() []error { return e.causes }
+func (e *providerAttemptsError) Error() string              { return "échec d'un ou plusieurs providers STT" }
+func (e *providerAttemptsError) Unwrap() []error            { return e.causes }
+func (e *providerAttemptsError) EffectiveClass() errs.Class { return e.class }
 
 func failedAttempt(provider Provider, err error) error {
-	cause := &providerAttemptsError{effective: provider.Name(), causes: []error{err}}
-	return errs.Wrap(errs.Classify(err), "stt", fmt.Sprintf("provider %q en échec (%s)", provider.Name(), errs.Classify(err)), cause)
+	class := errs.Classify(err)
+	cause := &providerAttemptsError{effective: provider.Name(), class: class, causes: []error{err}}
+	return errs.Wrap(class, "stt", fmt.Sprintf("provider %q en échec (%s)", provider.Name(), class), cause)
 }
 
 func failedAttempts(primary, fallback Provider, primaryErr, fallbackErr error) error {
-	cause := &providerAttemptsError{effective: fallback.Name(), causes: []error{primaryErr, fallbackErr}}
+	class := errs.Classify(fallbackErr)
+	cause := &providerAttemptsError{effective: fallback.Name(), class: class, causes: []error{primaryErr, fallbackErr}}
 	message := fmt.Sprintf(
 		"providers %q (%s) et %q (%s) en échec",
 		primary.Name(), errs.Classify(primaryErr), fallback.Name(), errs.Classify(fallbackErr),
 	)
-	return errs.Wrap(errs.Classify(fallbackErr), "stt", message, cause)
+	return errs.Wrap(class, "stt", message, cause)
 }
 
 func ProviderFromError(err error) string {

@@ -60,7 +60,8 @@ func (c *Client) Subscribe(ctx context.Context) (<-chan events.Event, <-chan err
 		conn.Close()
 		return nil, nil, err
 	}
-	response, err := c.readResponse(conn)
+	decoder := json.NewDecoder(conn)
+	response, err := c.readResponseWithDecoder(conn, decoder)
 	if err != nil {
 		stopContextClose()
 		conn.Close()
@@ -79,7 +80,6 @@ func (c *Client) Subscribe(ctx context.Context) (<-chan events.Event, <-chan err
 		defer close(errorStream)
 		defer conn.Close()
 		defer stopContextClose()
-		decoder := json.NewDecoder(conn)
 		for {
 			var event events.Event
 			if err := decoder.Decode(&event); err != nil {
@@ -122,9 +122,13 @@ func (c *Client) writeRequest(conn net.Conn, request Request) error {
 }
 
 func (c *Client) readResponse(conn net.Conn) (Response, error) {
+	return c.readResponseWithDecoder(conn, json.NewDecoder(conn))
+}
+
+func (c *Client) readResponseWithDecoder(conn net.Conn, decoder *json.Decoder) (Response, error) {
 	conn.SetReadDeadline(time.Now().Add(c.ReadTimeout))
 	var response Response
-	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+	if err := decoder.Decode(&response); err != nil {
 		return Response{}, errs.Wrap(errs.Unavailable, "ipc", "lecture de la réponse impossible", err)
 	}
 	if response.Version != Version {
