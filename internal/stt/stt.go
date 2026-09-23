@@ -587,11 +587,15 @@ func transcribeWith(ctx context.Context, provider Provider, segments []Segment, 
 		outcome := transcribeOne(ctx, provider, segment, progress, budget)
 		err := outcome.err
 		if err != nil {
+			// A fatal error must not be replaced by an earlier recoverable one.
+			if errs.Classify(err) == errs.Cancelled || isTranscriptLimitError(err) {
+				return results, err
+			}
+			if !continueOnError {
+				return results, err
+			}
 			if firstErr == nil {
 				firstErr = err
-			}
-			if !continueOnError || errs.Classify(err) == errs.Cancelled || isTranscriptLimitError(err) {
-				break
 			}
 			continue
 		}

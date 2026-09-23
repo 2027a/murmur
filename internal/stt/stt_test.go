@@ -546,6 +546,69 @@ func TestSegmentTextBudgetCountsUTF8BytesAndRejectsPartialOutput(t *testing.T) {
 	}
 }
 
+func TestBatchFatalErrorsOverrideEarlierRecoverableFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		firstFailure bool
+		allowPartial bool
+		text         string
+		limit        int
+	}{
+		{name: "partial ASCII separator", firstFailure: true, allowPartial: true, text: "aaaa", limit: 8},
+		{name: "strict ASCII separator", text: "aaaa", limit: 8},
+		{name: "partial UTF-8 bytes", firstFailure: true, allowPartial: true, text: "éé", limit: 8},
+		{name: "strict UTF-8 bytes", text: "éé", limit: 8},
+		{name: "no earlier failure", allowPartial: true, text: "aaaa", limit: 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &fakeProvider{name: "primary", responses: map[string]Result{
+				"1": {Text: tc.text}, "2": {Text: tc.text},
+			}}
+			paths := []string{"1", "2"}
+			if tc.firstFailure {
+				provider.errors = map[string]error{"0": errs.New(errs.Unavailable, "fake", "down")}
+				paths = append([]string{"0"}, paths...)
+			}
+			chain, err := NewChain(provider, nil, MultiOptions{AllowPartial: tc.allowPartial, MaxTextBytes: tc.limit})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := chain.TranscribeSegments(context.Background(), segments(paths...), Progress{})
+			if !IsLimitExceeded(err) || errs.Classify(err) != errs.ServerError || ProviderFromError(err) != "primary" || result.Text != "" || result.Segments != nil {
+				t.Fatalf("result=%#v error=%v provider=%q", result, err, ProviderFromError(err))
+			}
+		})
+	}
+}
+
+func TestBatchCancellationOverridesEarlierRecoverableFailure(t *testing.T) {
+	for _, allowPartial := range []bool{false, true} {
+		t.Run(strconv.FormatBool(allowPartial), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			provider := providerFunc{name: "primary", transcribe: func(_ context.Context, request Request) (Result, error) {
+				if request.Model == "0" {
+					return Result{}, errs.New(errs.Unavailable, "fake", "down")
+				}
+				cancel()
+				return Result{Text: "ok"}, nil
+			}}
+			chain, err := NewChain(provider, nil, MultiOptions{AllowPartial: allowPartial})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := chain.TranscribeSegments(ctx, segments("0", "1", "2"), Progress{})
+			want := errs.Cancelled
+			if !allowPartial {
+				want = errs.Unavailable // Strict mode stops on the first error.
+			}
+			if errs.Classify(err) != want || result.Text != "" || result.Segments != nil {
+				t.Fatalf("result=%#v error=%v", result, err)
+			}
+		})
+	}
+}
+
 func TestFallbackSharesTextBudgetWithDiscardedPrimaryResults(t *testing.T) {
 	primary := &fakeProvider{
 		name:      "primary",
