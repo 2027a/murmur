@@ -873,12 +873,14 @@ func TestLiveStopDrainsAfterFatalSTT(t *testing.T) {
 		name        string
 		limit       int
 		maxSegments int
+		cancel      bool
 		want        Result
 		message     string
 	}{
 		{name: "fatal budget", limit: 2, want: Failed, message: stt.TextBudgetExceeded},
 		{name: "fatal segment count", limit: 1024, maxSegments: 1, want: Failed, message: stt.SegmentLimitExceeded},
 		{name: "within budget", limit: 1024, want: Completed},
+		{name: "cancel during stop", limit: 1024, cancel: true, want: Cancelled},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			release := make(chan struct{})
@@ -914,6 +916,11 @@ func TestLiveStopDrainsAfterFatalSTT(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("audio stop not started")
 			}
+			if tc.cancel {
+				if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Cancel)); !response.OK {
+					t.Fatalf("cancel response=%#v", response)
+				}
+			}
 			close(release)
 			result := awaitResult(t, done)
 			if result.Result != tc.want {
@@ -923,8 +930,10 @@ func TestLiveStopDrainsAfterFatalSTT(t *testing.T) {
 				if result.Provider != "primary" || result.Error == nil || result.Error.Class != errs.ServerError || result.Error.Message != tc.message || target.count() != 0 {
 					t.Fatalf("result=%#v sink calls=%d", result, target.count())
 				}
-			} else if target.count() != 1 {
+			} else if tc.want == Completed && target.count() != 1 {
 				t.Fatalf("sink calls=%d", target.count())
+			} else if tc.want == Cancelled && target.count() != 0 {
+				t.Fatalf("sink called after cancellation: %d", target.count())
 			}
 		})
 	}
