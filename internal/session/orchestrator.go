@@ -362,26 +362,31 @@ func (o *Orchestrator) runLive() error {
 	stopped := make(chan error, 1)
 	go func() { stopped <- recording.Stop(o.ctx) }()
 	var stopErr error
+	var earlyResult *transcriptionOutcome
 	select {
 	case stopErr = <-stopped:
 	case outcome := <-transcribed:
-		if outcome.err == nil {
-			outcome.err = errs.New(errs.Internal, "session", "STT live terminé avant la fin de la capture")
+		if outcome.err != nil {
+			o.cancelOps()
+			abortErr := recording.Abort()
+			<-stopped
+			<-forwarded
+			// An expected cancellation from Abort must not mask the STT failure.
+			if abortErr != nil && errs.Classify(abortErr) != errs.Cancelled {
+				outcome.err = errors.Join(outcome.err, abortErr)
+			}
+			return o.fail(outcome.err)
 		}
-		o.cancelOps()
-		abortErr := recording.Abort()
-		<-stopped
-		<-forwarded
-		// An expected cancellation from Abort must not mask the STT failure.
-		if abortErr != nil && errs.Classify(abortErr) != errs.Cancelled {
-			outcome.err = errors.Join(outcome.err, abortErr)
-		}
-		return o.fail(outcome.err)
+		// The producer may close normally just before Stop returns.
+		earlyResult = &outcome
+		stopErr = <-stopped
 	}
 	if stopErr != nil {
 		_, _ = recording.Release()
 		<-forwarded
-		<-transcribed
+		if earlyResult == nil {
+			<-transcribed
+		}
 		if o.machine.Result() != "" {
 			return nil
 		}
@@ -401,7 +406,12 @@ func (o *Orchestrator) runLive() error {
 		return o.fail(err)
 	}
 	<-forwarded
-	outcome := <-transcribed
+	var outcome transcriptionOutcome
+	if earlyResult != nil {
+		outcome = *earlyResult
+	} else {
+		outcome = <-transcribed
+	}
 	_, cleanupErr := recording.Release()
 	if outcome.err != nil {
 		outcome.err = errors.Join(outcome.err, cleanupErr)
