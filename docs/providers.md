@@ -99,7 +99,9 @@ et leurs séparateurs d'assemblage. Un fallback complet ne remet pas le compteur
 à zéro: les résultats primaires réussis mais finalement écartés restent donc
 comptés. Le dépassement est toujours `server_error: volume cumulé des
 transcriptions supérieur à la limite configurée`; aucun `MultiResult` partiel
-n'est retourné, y compris lorsque `AllowPartial` est actif.
+n'est retourné, y compris lorsque `AllowPartial` est actif. En batch, un
+échec récupérable antérieur ne masque jamais un dépassement ultérieur ni une
+annulation: ces erreurs fatales interdisent aussi la livraison du texte partiel.
 
 Le contexte interne du pool est annulé dès le dépassement. Les requêtes HTTP en
 vol sont interrompues et aucun nouveau job n'est accepté. `TranscribeStream` ne

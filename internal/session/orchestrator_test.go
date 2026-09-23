@@ -44,8 +44,10 @@ func (p fixedTextProvider) Transcribe(context.Context, stt.Request) (stt.Result,
 }
 
 type intermediateFailureProvider struct {
-	mu    sync.Mutex
-	calls int
+	mu       sync.Mutex
+	calls    int
+	text     string
+	failCall int
 }
 
 func (p *intermediateFailureProvider) Name() string { return "primary" }
@@ -53,8 +55,15 @@ func (p *intermediateFailureProvider) Transcribe(context.Context, stt.Request) (
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
-	if p.calls == 2 {
+	failCall := p.failCall
+	if failCall == 0 {
+		failCall = 2
+	}
+	if p.calls == failCall {
 		return stt.Result{}, errs.New(errs.ServerError, "fake", "down")
+	}
+	if p.text != "" {
+		return stt.Result{Text: p.text}, nil
 	}
 	return stt.Result{Text: "ok"}, nil
 }
@@ -660,6 +669,48 @@ func TestTranscriptBudgetFailureNeverCallsProcessorOrSink(t *testing.T) {
 		Processor:     &fakeProcessor{started: processorStarted, result: textpipe.Result{Text: "final"}},
 		Sink:          target,
 		UI:            ui.NewNone(), Bus: events.NewBus(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := runOrchestrator(o)
+	waitForState(t, o, Recording)
+	if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Stop)); !response.OK {
+		t.Fatalf("stop response=%#v", response)
+	}
+	result := awaitResult(t, done)
+	if result.Result != Failed || result.Provider != "primary" || result.Error == nil || result.Error.Class != errs.ServerError || result.Error.Message != stt.TextBudgetExceeded {
+		t.Fatalf("result=%#v", result)
+	}
+	select {
+	case <-processorStarted:
+		t.Fatal("processor called after transcript budget overflow")
+	default:
+	}
+	if target.count() != 0 {
+		t.Fatalf("sink calls=%d", target.count())
+	}
+}
+
+func TestBatchPartialFailureThenBudgetOverflowNeverDelivers(t *testing.T) {
+	// The first error is recoverable; the third segment exceeds the cumulative
+	// UTF-8 budget including its separator and must remain fatal.
+	provider := &intermediateFailureProvider{text: "éé", failCall: 1}
+	chain, err := stt.NewChain(provider, nil, stt.MultiOptions{AllowPartial: true, MaxTextBytes: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processorStarted := make(chan struct{})
+	target := &fakeSink{}
+	runtimeDir := t.TempDir()
+	o, err := NewOrchestrator(OrchestratorOptions{
+		Context: context.Background(), SessionID: "partial-budget", RuntimeDir: runtimeDir,
+		Recorder:      &audio.FakeRecorder{FixturePath: sessionWAVDuration(t, 3*time.Second)},
+		RecordOptions: audio.RecordOptions{Directory: runtimeDir},
+		ChunkDuration: time.Second,
+		Transcriber:   chain,
+		Processor:     &fakeProcessor{started: processorStarted, result: textpipe.Result{Text: "final"}},
+		Sink:          target, UI: ui.NewNone(), Bus: events.NewBus(),
 	})
 	if err != nil {
 		t.Fatal(err)
