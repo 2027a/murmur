@@ -139,6 +139,46 @@ func (r observedRecorder) Start(ctx context.Context, opts audio.RecordOptions) (
 	return recording, err
 }
 
+type stopObservedRecorder struct {
+	*audio.FakeRecorder
+	stopStarted chan struct{}
+}
+
+func (r stopObservedRecorder) StartLive(ctx context.Context, opts audio.RecordOptions, live audio.LiveOptions) (audio.LiveRecording, error) {
+	recording, err := r.FakeRecorder.StartLive(ctx, opts, live)
+	if err != nil {
+		return nil, err
+	}
+	return stopObservedRecording{LiveRecording: recording, started: r.stopStarted}, nil
+}
+
+type stopObservedRecording struct {
+	audio.LiveRecording
+	started chan struct{}
+}
+
+func (r stopObservedRecording) Stop(ctx context.Context) error {
+	close(r.started)
+	return r.LiveRecording.Stop(ctx)
+}
+
+type gatedLiveProvider struct {
+	started chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (p *gatedLiveProvider) Name() string { return "primary" }
+func (p *gatedLiveProvider) Transcribe(ctx context.Context, _ stt.Request) (stt.Result, error) {
+	p.once.Do(func() { close(p.started) })
+	select {
+	case <-p.release:
+		return stt.Result{Text: "éé"}, nil
+	case <-ctx.Done():
+		return stt.Result{}, ctx.Err()
+	}
+}
+
 type countingStartRecorder struct {
 	calls atomic.Int32
 }
@@ -825,6 +865,68 @@ func TestLiveTranscriptBudgetAbortsCaptureWithoutStopOrSink(t *testing.T) {
 	}
 	if target.count() != 0 {
 		t.Fatalf("sink calls=%d", target.count())
+	}
+}
+
+func TestLiveStopDrainsAfterFatalSTT(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		limit       int
+		maxSegments int
+		want        Result
+		message     string
+	}{
+		{name: "fatal budget", limit: 2, want: Failed, message: stt.TextBudgetExceeded},
+		{name: "fatal segment count", limit: 1024, maxSegments: 1, want: Failed, message: stt.SegmentLimitExceeded},
+		{name: "within budget", limit: 1024, want: Completed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			release := make(chan struct{})
+			provider := &gatedLiveProvider{started: make(chan struct{}), release: release}
+			chain, err := stt.NewChain(provider, nil, stt.MultiOptions{Workers: 1, MaxTextBytes: tc.limit, MaxSegments: tc.maxSegments})
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			stopStarted := make(chan struct{})
+			target := &fakeSink{}
+			o, err := NewOrchestrator(OrchestratorOptions{
+				Context: context.Background(), SessionID: "live-stop-drain", RuntimeDir: root,
+				Recorder:      stopObservedRecorder{FakeRecorder: &audio.FakeRecorder{FixturePath: sessionWAVDuration(t, 5*time.Second), LiveStepInterval: time.Millisecond}, stopStarted: stopStarted},
+				RecordOptions: audio.RecordOptions{Directory: root}, ChunkDuration: 100 * time.Millisecond,
+				LiveChunking: true, Transcriber: chain, Processor: &fakeProcessor{result: textpipe.Result{Text: "final"}},
+				Sink: target, UI: ui.NewNone(), Bus: events.NewBus(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := runOrchestrator(o)
+			select {
+			case <-provider.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("no live segment reached STT")
+			}
+			if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Stop)); !response.OK {
+				t.Fatalf("stop response=%#v", response)
+			}
+			select {
+			case <-stopStarted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("audio stop not started")
+			}
+			close(release)
+			result := awaitResult(t, done)
+			if result.Result != tc.want {
+				t.Fatalf("result=%#v", result)
+			}
+			if tc.want == Failed {
+				if result.Provider != "primary" || result.Error == nil || result.Error.Class != errs.ServerError || result.Error.Message != tc.message || target.count() != 0 {
+					t.Fatalf("result=%#v sink calls=%d", result, target.count())
+				}
+			} else if target.count() != 1 {
+				t.Fatalf("sink calls=%d", target.count())
+			}
+		})
 	}
 }
 

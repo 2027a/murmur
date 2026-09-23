@@ -357,18 +357,39 @@ func (o *Orchestrator) runLive() error {
 			return nil
 		}
 	}
-	if err := recording.Stop(o.ctx); err != nil {
+	// Stop may block while final segments are sent. Continue watching the STT
+	// consumer so a fatal result can cancel the producer and release backpressure.
+	stopped := make(chan error, 1)
+	go func() { stopped <- recording.Stop(o.ctx) }()
+	var stopErr error
+	select {
+	case stopErr = <-stopped:
+	case outcome := <-transcribed:
+		if outcome.err == nil {
+			outcome.err = errs.New(errs.Internal, "session", "STT live terminé avant la fin de la capture")
+		}
+		o.cancelOps()
+		abortErr := recording.Abort()
+		<-stopped
+		<-forwarded
+		// An expected cancellation from Abort must not mask the STT failure.
+		if abortErr != nil && errs.Classify(abortErr) != errs.Cancelled {
+			outcome.err = errors.Join(outcome.err, abortErr)
+		}
+		return o.fail(outcome.err)
+	}
+	if stopErr != nil {
 		_, _ = recording.Release()
 		<-forwarded
 		<-transcribed
 		if o.machine.Result() != "" {
 			return nil
 		}
-		if errs.Classify(err) == errs.NoSpeech {
+		if errs.Classify(stopErr) == errs.NoSpeech {
 			_ = o.machine.ApplyTerminal(NoSpeechCommand, o.currentProvider(), errs.NoSpeech)
 			return nil
 		}
-		return o.fail(err)
+		return o.fail(stopErr)
 	}
 	if err := o.machine.Apply(CaptureStoppedCommand); err != nil {
 		_, _ = recording.Release()
