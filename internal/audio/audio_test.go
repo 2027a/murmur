@@ -45,6 +45,36 @@ func TestFakeRecorderStopAndDefaultCleanup(t *testing.T) {
 	}
 }
 
+func TestWavFileDiscardAfterStopNeverRetains(t *testing.T) {
+	root := t.TempDir()
+	diagnostics := filepath.Join(root, "diagnostics")
+	recording, err := (&FakeRecorder{FixturePath: audioFixture(t, time.Second)}).Start(context.Background(), RecordOptions{
+		Directory: root, Retention: RetentionOptions{Keep: true, Directory: diagnostics},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-recording.Ready(); err != nil {
+		t.Fatal(err)
+	}
+	file, err := recording.Stop(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Discard(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Discard(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(file.Path()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("capture still present: %v", err)
+	}
+	if _, err := os.Stat(diagnostics); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("diagnostic directory created: %v", err)
+	}
+}
+
 func TestFakeRecorderAbortAlwaysRemoves(t *testing.T) {
 	recorder := &FakeRecorder{FixturePath: audioFixture(t, time.Second)}
 	root := t.TempDir()

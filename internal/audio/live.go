@@ -36,6 +36,7 @@ type LiveRecording interface {
 	Stop(context.Context) error
 	Abort() error
 	Release() (string, error)
+	Discard() error
 }
 
 func ValidateLiveOptions(options LiveOptions) error {
@@ -488,6 +489,14 @@ func (r *fakeLiveRecording) Abort() error {
 	if err := r.result(); err != nil && !errors.Is(err, context.Canceled) {
 		return errors.Join(err, r.cleanErr)
 	}
+	return r.cleanErr
+}
+
+func (r *fakeLiveRecording) Discard() error {
+	<-r.done
+	r.cleanup.Do(func() {
+		r.cleanErr = errors.Join(r.segmenter.Close(), os.RemoveAll(r.tempDir))
+	})
 	return r.cleanErr
 }
 

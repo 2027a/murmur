@@ -942,6 +942,39 @@ func TestLiveAbortLeavesNoProcessOrCaptureWithRetention(t *testing.T) {
 	waitEmpty(t, root)
 }
 
+func TestLiveDiscardAfterStopIgnoresRetention(t *testing.T) {
+	root := t.TempDir()
+	capture := filepath.Join(root, "capture")
+	if err := os.Mkdir(capture, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(capture, "recording.wav")
+	writeWAV(t, path, 200*time.Millisecond)
+	file, err := wav.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := filepath.Join(root, "diagnostics")
+	done := make(chan struct{})
+	close(done)
+	recording := &liveRecording{
+		tempDir: capture, done: done,
+		final: audio.NewWavFile(file, capture, audio.RetentionOptions{Keep: true, Directory: diagnostics}),
+	}
+	if err := recording.Discard(); err != nil {
+		t.Fatal(err)
+	}
+	if err := recording.Discard(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(capture); !os.IsNotExist(err) {
+		t.Fatalf("capture still present: %v", err)
+	}
+	if _, err := os.Stat(diagnostics); !os.IsNotExist(err) {
+		t.Fatalf("diagnostic directory created: %v", err)
+	}
+}
+
 func TestLiveAbortClosesFinalSnapshotAfterFinalizeError(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "recording.wav")
