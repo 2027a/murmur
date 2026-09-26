@@ -6,6 +6,8 @@ OpenAI, applique un pipeline texte déterministe, puis livre le résultat par
 collage, frappe, presse-papiers, stdout ou fichier. Le réseau autorisé, les
 secrets, la rétention et l'interface sont explicites dans la configuration.
 
+Dépôt source : <https://git.2027a.net/2027a/murmur>.
+
 ## Installation
 
 La construction exige Go 1.23 ou ultérieur. L'installation utilise les chemins

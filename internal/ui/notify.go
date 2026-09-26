@@ -8,8 +8,8 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
-	"git.2027a.net/mathieu/murmur/internal/events"
-	"git.2027a.net/mathieu/murmur/internal/logging"
+	"git.2027a.net/2027a/murmur/internal/events"
+	"git.2027a.net/2027a/murmur/internal/logging"
 )
 
 const (

@@ -13,12 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"git.2027a.net/mathieu/murmur/internal/config"
-	"git.2027a.net/mathieu/murmur/internal/doctor"
-	"git.2027a.net/mathieu/murmur/internal/errs"
-	"git.2027a.net/mathieu/murmur/internal/ipc"
-	"git.2027a.net/mathieu/murmur/internal/session"
-	"git.2027a.net/mathieu/murmur/internal/xdg"
+	"git.2027a.net/2027a/murmur/internal/config"
+	"git.2027a.net/2027a/murmur/internal/doctor"
+	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/ipc"
+	"git.2027a.net/2027a/murmur/internal/session"
+	"git.2027a.net/2027a/murmur/internal/xdg"
 )
 
 const usage = `Usage: murmur <commande> [options]

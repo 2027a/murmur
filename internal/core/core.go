@@ -9,15 +9,15 @@ import (
 	"os"
 	"time"
 
-	"git.2027a.net/mathieu/murmur/internal/cleanup"
-	"git.2027a.net/mathieu/murmur/internal/config"
-	"git.2027a.net/mathieu/murmur/internal/errs"
-	"git.2027a.net/mathieu/murmur/internal/plugin"
-	markdownplugin "git.2027a.net/mathieu/murmur/internal/plugin/markdown"
-	"git.2027a.net/mathieu/murmur/internal/policy"
-	"git.2027a.net/mathieu/murmur/internal/stt"
-	"git.2027a.net/mathieu/murmur/internal/sysexec"
-	"git.2027a.net/mathieu/murmur/internal/textpipe"
+	"git.2027a.net/2027a/murmur/internal/cleanup"
+	"git.2027a.net/2027a/murmur/internal/config"
+	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/plugin"
+	markdownplugin "git.2027a.net/2027a/murmur/internal/plugin/markdown"
+	"git.2027a.net/2027a/murmur/internal/policy"
+	"git.2027a.net/2027a/murmur/internal/stt"
+	"git.2027a.net/2027a/murmur/internal/sysexec"
+	"git.2027a.net/2027a/murmur/internal/textpipe"
 )
 
 type BuildOptions struct {

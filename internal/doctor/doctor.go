@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"git.2027a.net/mathieu/murmur/internal/config"
-	"git.2027a.net/mathieu/murmur/internal/core"
-	"git.2027a.net/mathieu/murmur/internal/sysexec"
-	"git.2027a.net/mathieu/murmur/internal/ui"
-	"git.2027a.net/mathieu/murmur/internal/xdg"
+	"git.2027a.net/2027a/murmur/internal/config"
+	"git.2027a.net/2027a/murmur/internal/core"
+	"git.2027a.net/2027a/murmur/internal/sysexec"
+	"git.2027a.net/2027a/murmur/internal/ui"
+	"git.2027a.net/2027a/murmur/internal/xdg"
 )
 
 type SecretResolver interface {

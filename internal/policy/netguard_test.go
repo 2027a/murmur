@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"git.2027a.net/mathieu/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/errs"
 )
 
 func TestClassify(t *testing.T) {

@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"git.2027a.net/mathieu/murmur/internal/errs"
-	"git.2027a.net/mathieu/murmur/internal/events"
+	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/events"
 )
 
 func TestMachineNominalLifecycle(t *testing.T) {

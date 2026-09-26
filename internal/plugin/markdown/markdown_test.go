@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	pluginruntime "git.2027a.net/mathieu/murmur/internal/plugin"
-	"git.2027a.net/mathieu/murmur/internal/policy"
-	"git.2027a.net/mathieu/murmur/internal/textpipe"
+	pluginruntime "git.2027a.net/2027a/murmur/internal/plugin"
+	"git.2027a.net/2027a/murmur/internal/policy"
+	"git.2027a.net/2027a/murmur/internal/textpipe"
 )
 
 type fixture struct {

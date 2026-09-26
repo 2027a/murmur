@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"git.2027a.net/mathieu/murmur/internal/events"
+	"git.2027a.net/2027a/murmur/internal/events"
 )
 
 type collectingPublisher struct {
