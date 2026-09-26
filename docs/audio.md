@@ -116,9 +116,14 @@ suppression de la capture source et avant le retour. La source n'est supprimée
 que si son chemin désigne encore le device/inode ouvert avant copie; sinon la
 copie diagnostique est annulée, le remplacement reste intact et l'appel échoue.
 
-L'orchestrateur doit appeler `Release` après la dernière utilisation par le STT.
-Les captures invalides ou trop courtes suivent immédiatement la même politique;
-une annulation, elle, ne conserve rien.
+L'orchestrateur diffère `Release` jusqu'au résultat terminal : une annulation
+pendant la transcription ou le traitement appelle `Discard` et supprime la
+capture, même si la rétention est activée. La décision de nettoyage est unique
+et ne peut plus être remplacée après coup. Une session non annulée conserve la
+politique de rétention habituelle. Une erreur de nettoyage tardive est
+consignée comme warning audio dans le résultat final, après l'événement
+terminal. Les captures invalides ou trop courtes suivent immédiatement cette
+même politique.
 
 ## Découpage
 

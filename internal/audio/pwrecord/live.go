@@ -278,6 +278,17 @@ func (r *liveRecording) Abort() error {
 	return r.cleanErr
 }
 
+func (r *liveRecording) Discard() error {
+	<-r.done
+	r.cleanup.Do(func() {
+		r.mu.Lock()
+		final := r.final
+		r.mu.Unlock()
+		r.cleanErr = errors.Join(r.closeSegmenter(), final.File.Close(), os.RemoveAll(r.tempDir))
+	})
+	return r.cleanErr
+}
+
 func (r *liveRecording) Release() (string, error) {
 	r.cleanup.Do(func() {
 		r.mu.Lock()

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -529,6 +530,78 @@ func TestAcceptance_09_CancelBeforeDeliveringNeverCallsSink(t *testing.T) {
 	result := awaitResult(t, done)
 	if result.Result != Cancelled || target.count() != 0 {
 		t.Fatalf("result=%#v sink calls=%d", result, target.count())
+	}
+}
+
+func TestCancelledSessionNeverRetainsAudio(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		for _, stage := range []string{"transcribing", "processing", "completed"} {
+			for _, keep := range []bool{false, true} {
+				name := "batch"
+				if live {
+					name = "live"
+				}
+				t.Run(name+"/"+stage+"/keep="+strconv.FormatBool(keep), func(t *testing.T) {
+					root := t.TempDir()
+					diagnostics := filepath.Join(root, "diagnostics")
+					started := make(chan struct{})
+					transcriber := &fakeTranscriber{result: stt.MultiResult{Text: "brut", Provider: "primary"}}
+					processor := &fakeProcessor{result: textpipe.Result{Text: "final"}}
+					if stage == "transcribing" {
+						transcriber.started = started
+						transcriber.gate = make(chan struct{})
+					} else if stage == "processing" {
+						processor.started = started
+						processor.gate = make(chan struct{})
+					}
+					target := &fakeSink{}
+					o, err := NewOrchestrator(OrchestratorOptions{
+						Context: context.Background(), SessionID: "retention-" + name, RuntimeDir: root,
+						Recorder:      &audio.FakeRecorder{FixturePath: sessionWAVDuration(t, 2*time.Second)},
+						RecordOptions: audio.RecordOptions{Directory: root, Retention: audio.RetentionOptions{Keep: keep, Directory: diagnostics}},
+						ChunkDuration: 100 * time.Millisecond, LiveChunking: live,
+						Transcriber: transcriber, Processor: processor, Sink: target, UI: ui.NewNone(), Bus: events.NewBus(),
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					done := runOrchestrator(o)
+					waitForState(t, o, Recording)
+					if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Stop)); !response.OK {
+						t.Fatalf("stop response=%#v", response)
+					}
+					if stage != "completed" {
+						await(t, started)
+						if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Cancel)); !response.OK {
+							t.Fatalf("cancel response=%#v", response)
+						}
+					}
+					result := awaitResult(t, done)
+					want := Cancelled
+					if stage == "completed" {
+						want = Completed
+					}
+					if result.Result != want || (stage != "completed" && target.count() != 0) || (stage == "completed" && target.count() != 1) {
+						t.Fatalf("result=%#v error=%+v sink calls=%d", result, result.Error, target.count())
+					}
+					files, err := filepath.Glob(filepath.Join(diagnostics, "recording-*.wav"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					wantFiles := 0
+					if stage == "completed" && keep {
+						wantFiles = 1
+					}
+					if len(files) != wantFiles {
+						t.Fatalf("diagnostic WAVs=%v want=%d", files, wantFiles)
+					}
+					captures, err := filepath.Glob(filepath.Join(root, "murmur-audio-*"))
+					if err != nil || len(captures) != 0 {
+						t.Fatalf("capture leftovers=%v error=%v", captures, err)
+					}
+				})
+			}
+		}
 	}
 }
 
