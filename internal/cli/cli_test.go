@@ -20,16 +20,16 @@ import (
 	"testing"
 	"time"
 
-	"git.2027a.net/mathieu/murmur/internal/audio"
-	"git.2027a.net/mathieu/murmur/internal/config"
-	"git.2027a.net/mathieu/murmur/internal/errs"
-	"git.2027a.net/mathieu/murmur/internal/events"
-	"git.2027a.net/mathieu/murmur/internal/ipc"
-	"git.2027a.net/mathieu/murmur/internal/session"
-	"git.2027a.net/mathieu/murmur/internal/sink"
-	"git.2027a.net/mathieu/murmur/internal/stt"
-	"git.2027a.net/mathieu/murmur/internal/textpipe"
-	"git.2027a.net/mathieu/murmur/internal/xdg"
+	"git.2027a.net/2027a/murmur/internal/audio"
+	"git.2027a.net/2027a/murmur/internal/config"
+	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/events"
+	"git.2027a.net/2027a/murmur/internal/ipc"
+	"git.2027a.net/2027a/murmur/internal/session"
+	"git.2027a.net/2027a/murmur/internal/sink"
+	"git.2027a.net/2027a/murmur/internal/stt"
+	"git.2027a.net/2027a/murmur/internal/textpipe"
+	"git.2027a.net/2027a/murmur/internal/xdg"
 )
 
 func privateCLITempDir(t *testing.T) string {

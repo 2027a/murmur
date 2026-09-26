@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
-	"git.2027a.net/mathieu/murmur/internal/errs"
-	"git.2027a.net/mathieu/murmur/internal/events"
+	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/events"
 )
 
 var ErrNoSession = errs.New(errs.Unavailable, "ipc-no-session", "aucune session active")

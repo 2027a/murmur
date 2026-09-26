@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.2027a.net/mathieu/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/errs"
 )
 
 func TestPluginConfigurationDefaultsAndValidation(t *testing.T) {

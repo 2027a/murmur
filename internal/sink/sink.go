@@ -9,13 +9,13 @@ import (
 	"strings"
 	"sync"
 
-	"git.2027a.net/mathieu/murmur/internal/clipboard"
-	"git.2027a.net/mathieu/murmur/internal/config"
-	"git.2027a.net/mathieu/murmur/internal/delivery"
-	"git.2027a.net/mathieu/murmur/internal/errs"
-	"git.2027a.net/mathieu/murmur/internal/inject"
-	"git.2027a.net/mathieu/murmur/internal/sysexec"
-	"git.2027a.net/mathieu/murmur/internal/xdg"
+	"git.2027a.net/2027a/murmur/internal/clipboard"
+	"git.2027a.net/2027a/murmur/internal/config"
+	"git.2027a.net/2027a/murmur/internal/delivery"
+	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/inject"
+	"git.2027a.net/2027a/murmur/internal/sysexec"
+	"git.2027a.net/2027a/murmur/internal/xdg"
 )
 
 type Mode string

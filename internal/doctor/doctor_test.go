@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"git.2027a.net/mathieu/murmur/internal/config"
-	"git.2027a.net/mathieu/murmur/internal/policy"
-	"git.2027a.net/mathieu/murmur/internal/sysexec"
+	"git.2027a.net/2027a/murmur/internal/config"
+	"git.2027a.net/2027a/murmur/internal/policy"
+	"git.2027a.net/2027a/murmur/internal/sysexec"
 )
 
 type fakeSource struct {

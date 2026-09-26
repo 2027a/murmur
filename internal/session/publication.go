@@ -3,7 +3,7 @@ package session
 import (
 	"sync"
 
-	"git.2027a.net/mathieu/murmur/internal/events"
+	"git.2027a.net/2027a/murmur/internal/events"
 )
 
 // publicationGate serializes one session's stream and seals it after terminal.

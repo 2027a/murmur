@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"git.2027a.net/mathieu/murmur/internal/cli"
+	"git.2027a.net/2027a/murmur/internal/cli"
 )
 
 func run(args []string, stdout, stderr io.Writer) int {

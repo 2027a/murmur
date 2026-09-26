@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"git.2027a.net/mathieu/murmur/internal/audio/wav"
-	"git.2027a.net/mathieu/murmur/internal/config"
-	"git.2027a.net/mathieu/murmur/internal/errs"
-	"git.2027a.net/mathieu/murmur/internal/stt"
+	"git.2027a.net/2027a/murmur/internal/audio/wav"
+	"git.2027a.net/2027a/murmur/internal/config"
+	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/stt"
 )
 
 func TestBuildProcessorUsesConfiguredASCIIQuotes(t *testing.T) {

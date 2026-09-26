@@ -13,17 +13,17 @@ import (
 	"testing"
 	"time"
 
-	"git.2027a.net/mathieu/murmur/internal/audio"
-	"git.2027a.net/mathieu/murmur/internal/audio/pwrecord"
-	"git.2027a.net/mathieu/murmur/internal/audio/wav"
-	"git.2027a.net/mathieu/murmur/internal/errs"
-	"git.2027a.net/mathieu/murmur/internal/events"
-	"git.2027a.net/mathieu/murmur/internal/ipc"
-	"git.2027a.net/mathieu/murmur/internal/sink"
-	"git.2027a.net/mathieu/murmur/internal/stt"
-	"git.2027a.net/mathieu/murmur/internal/sysexec"
-	"git.2027a.net/mathieu/murmur/internal/textpipe"
-	"git.2027a.net/mathieu/murmur/internal/ui"
+	"git.2027a.net/2027a/murmur/internal/audio"
+	"git.2027a.net/2027a/murmur/internal/audio/pwrecord"
+	"git.2027a.net/2027a/murmur/internal/audio/wav"
+	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/events"
+	"git.2027a.net/2027a/murmur/internal/ipc"
+	"git.2027a.net/2027a/murmur/internal/sink"
+	"git.2027a.net/2027a/murmur/internal/stt"
+	"git.2027a.net/2027a/murmur/internal/sysexec"
+	"git.2027a.net/2027a/murmur/internal/textpipe"
+	"git.2027a.net/2027a/murmur/internal/ui"
 )
 
 type fakeTranscriber struct {

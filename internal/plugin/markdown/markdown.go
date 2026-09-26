@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"git.2027a.net/mathieu/murmur/internal/errs"
-	"git.2027a.net/mathieu/murmur/internal/policy"
+	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/policy"
 )
 
 type Kind string

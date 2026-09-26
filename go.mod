@@ -1,4 +1,4 @@
-module git.2027a.net/mathieu/murmur
+module git.2027a.net/2027a/murmur
 
 go 1.23.0
 

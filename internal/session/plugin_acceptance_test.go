@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.2027a.net/mathieu/murmur/internal/config"
-	"git.2027a.net/mathieu/murmur/internal/textpipe"
+	"git.2027a.net/2027a/murmur/internal/config"
+	"git.2027a.net/2027a/murmur/internal/textpipe"
 )
 
 func TestAcceptance_15_MarkdownDisabledPreservesOrdinaryWords(t *testing.T) {
