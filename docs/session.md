@@ -139,10 +139,11 @@ les tentatives non lancées. Chaque reprise par fallback forme de nouvelles
 tentatives identifiées par son propre provider. Le total reste omis tant que la
 capture n'est pas terminée.
 
-Lorsqu'un budget STT est dépassé en live, l'orchestrateur annule le forwarder
-avant d'aborter la capture et de l'attendre. Le pool STT ne détache aucun drain du
-canal de segments; le résultat terminal conserve le provider de la tentative qui
-a franchi la limite.
+Lorsqu'un budget STT est dépassé en live, y compris pendant le stop et le
+drainage des derniers segments, l'orchestrateur surveille le résultat STT,
+annule le forwarder puis aborte la capture et attend sa terminaison. Le pool
+STT ne détache aucun drain du canal de segments; le résultat terminal conserve
+l'erreur et le provider de la tentative qui a franchi la limite.
 
 La demande de stop emprunte un plan de contrôle distinct du transfert des
 segments. Même si les workers, l'entrée du pool et la file du recorder sont tous

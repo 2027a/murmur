@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -137,6 +138,46 @@ func (r observedRecorder) Start(ctx context.Context, opts audio.RecordOptions) (
 		r.started <- recording
 	}
 	return recording, err
+}
+
+type stopObservedRecorder struct {
+	*audio.FakeRecorder
+	stopStarted chan struct{}
+}
+
+func (r stopObservedRecorder) StartLive(ctx context.Context, opts audio.RecordOptions, live audio.LiveOptions) (audio.LiveRecording, error) {
+	recording, err := r.FakeRecorder.StartLive(ctx, opts, live)
+	if err != nil {
+		return nil, err
+	}
+	return stopObservedRecording{LiveRecording: recording, started: r.stopStarted}, nil
+}
+
+type stopObservedRecording struct {
+	audio.LiveRecording
+	started chan struct{}
+}
+
+func (r stopObservedRecording) Stop(ctx context.Context) error {
+	close(r.started)
+	return r.LiveRecording.Stop(ctx)
+}
+
+type gatedLiveProvider struct {
+	started chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (p *gatedLiveProvider) Name() string { return "primary" }
+func (p *gatedLiveProvider) Transcribe(ctx context.Context, _ stt.Request) (stt.Result, error) {
+	p.once.Do(func() { close(p.started) })
+	select {
+	case <-p.release:
+		return stt.Result{Text: "éé"}, nil
+	case <-ctx.Done():
+		return stt.Result{}, ctx.Err()
+	}
 }
 
 type countingStartRecorder struct {
@@ -492,6 +533,78 @@ func TestAcceptance_09_CancelBeforeDeliveringNeverCallsSink(t *testing.T) {
 	}
 }
 
+func TestCancelledSessionNeverRetainsAudio(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		for _, stage := range []string{"transcribing", "processing", "completed"} {
+			for _, keep := range []bool{false, true} {
+				name := "batch"
+				if live {
+					name = "live"
+				}
+				t.Run(name+"/"+stage+"/keep="+strconv.FormatBool(keep), func(t *testing.T) {
+					root := t.TempDir()
+					diagnostics := filepath.Join(root, "diagnostics")
+					started := make(chan struct{})
+					transcriber := &fakeTranscriber{result: stt.MultiResult{Text: "brut", Provider: "primary"}}
+					processor := &fakeProcessor{result: textpipe.Result{Text: "final"}}
+					if stage == "transcribing" {
+						transcriber.started = started
+						transcriber.gate = make(chan struct{})
+					} else if stage == "processing" {
+						processor.started = started
+						processor.gate = make(chan struct{})
+					}
+					target := &fakeSink{}
+					o, err := NewOrchestrator(OrchestratorOptions{
+						Context: context.Background(), SessionID: "retention-" + name, RuntimeDir: root,
+						Recorder:      &audio.FakeRecorder{FixturePath: sessionWAVDuration(t, 2*time.Second)},
+						RecordOptions: audio.RecordOptions{Directory: root, Retention: audio.RetentionOptions{Keep: keep, Directory: diagnostics}},
+						ChunkDuration: 100 * time.Millisecond, LiveChunking: live,
+						Transcriber: transcriber, Processor: processor, Sink: target, UI: ui.NewNone(), Bus: events.NewBus(),
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					done := runOrchestrator(o)
+					waitForState(t, o, Recording)
+					if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Stop)); !response.OK {
+						t.Fatalf("stop response=%#v", response)
+					}
+					if stage != "completed" {
+						await(t, started)
+						if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Cancel)); !response.OK {
+							t.Fatalf("cancel response=%#v", response)
+						}
+					}
+					result := awaitResult(t, done)
+					want := Cancelled
+					if stage == "completed" {
+						want = Completed
+					}
+					if result.Result != want || (stage != "completed" && target.count() != 0) || (stage == "completed" && target.count() != 1) {
+						t.Fatalf("result=%#v error=%+v sink calls=%d", result, result.Error, target.count())
+					}
+					files, err := filepath.Glob(filepath.Join(diagnostics, "recording-*.wav"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					wantFiles := 0
+					if stage == "completed" && keep {
+						wantFiles = 1
+					}
+					if len(files) != wantFiles {
+						t.Fatalf("diagnostic WAVs=%v want=%d", files, wantFiles)
+					}
+					captures, err := filepath.Glob(filepath.Join(root, "murmur-audio-*"))
+					if err != nil || len(captures) != 0 {
+						t.Fatalf("capture leftovers=%v error=%v", captures, err)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestLateCancelIsRejectedAndDeliveryOccursExactlyOnce(t *testing.T) {
 	started := make(chan struct{})
 	gate := make(chan struct{})
@@ -825,6 +938,77 @@ func TestLiveTranscriptBudgetAbortsCaptureWithoutStopOrSink(t *testing.T) {
 	}
 	if target.count() != 0 {
 		t.Fatalf("sink calls=%d", target.count())
+	}
+}
+
+func TestLiveStopDrainsAfterFatalSTT(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		limit       int
+		maxSegments int
+		cancel      bool
+		want        Result
+		message     string
+	}{
+		{name: "fatal budget", limit: 2, want: Failed, message: stt.TextBudgetExceeded},
+		{name: "fatal segment count", limit: 1024, maxSegments: 1, want: Failed, message: stt.SegmentLimitExceeded},
+		{name: "within budget", limit: 1024, want: Completed},
+		{name: "cancel during stop", limit: 1024, cancel: true, want: Cancelled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			release := make(chan struct{})
+			provider := &gatedLiveProvider{started: make(chan struct{}), release: release}
+			chain, err := stt.NewChain(provider, nil, stt.MultiOptions{Workers: 1, MaxTextBytes: tc.limit, MaxSegments: tc.maxSegments})
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			stopStarted := make(chan struct{})
+			target := &fakeSink{}
+			o, err := NewOrchestrator(OrchestratorOptions{
+				Context: context.Background(), SessionID: "live-stop-drain", RuntimeDir: root,
+				Recorder:      stopObservedRecorder{FakeRecorder: &audio.FakeRecorder{FixturePath: sessionWAVDuration(t, 5*time.Second), LiveStepInterval: time.Millisecond}, stopStarted: stopStarted},
+				RecordOptions: audio.RecordOptions{Directory: root}, ChunkDuration: 100 * time.Millisecond,
+				LiveChunking: true, Transcriber: chain, Processor: &fakeProcessor{result: textpipe.Result{Text: "final"}},
+				Sink: target, UI: ui.NewNone(), Bus: events.NewBus(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := runOrchestrator(o)
+			select {
+			case <-provider.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("no live segment reached STT")
+			}
+			if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Stop)); !response.OK {
+				t.Fatalf("stop response=%#v", response)
+			}
+			select {
+			case <-stopStarted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("audio stop not started")
+			}
+			if tc.cancel {
+				if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Cancel)); !response.OK {
+					t.Fatalf("cancel response=%#v", response)
+				}
+			}
+			close(release)
+			result := awaitResult(t, done)
+			if result.Result != tc.want {
+				t.Fatalf("result=%#v", result)
+			}
+			if tc.want == Failed {
+				if result.Provider != "primary" || result.Error == nil || result.Error.Class != errs.ServerError || result.Error.Message != tc.message || target.count() != 0 {
+					t.Fatalf("result=%#v sink calls=%d", result, target.count())
+				}
+			} else if tc.want == Completed && target.count() != 1 {
+				t.Fatalf("sink calls=%d", target.count())
+			} else if tc.want == Cancelled && target.count() != 0 {
+				t.Fatalf("sink called after cancellation: %d", target.count())
+			}
+		})
 	}
 }
 

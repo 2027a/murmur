@@ -243,15 +243,15 @@ func (o *Orchestrator) runCaptured() error {
 		return o.fail(err)
 	}
 	if err := o.machine.Apply(CaptureStoppedCommand); err != nil {
-		_, _ = file.Release()
-		if o.machine.Result() != "" {
-			return nil
-		}
-		return o.fail(err)
+		resultErr := o.fail(err)
+		o.finishCapture(file, "")
+		return resultErr
 	}
 
 	transcript, provider, warnings, err := o.transcribe(file)
-	return o.completeTranscript(transcript, provider, warnings, err)
+	resultErr := o.completeTranscript(transcript, provider, warnings, err)
+	o.finishCapture(file, provider)
+	return resultErr
 }
 
 func (o *Orchestrator) runLive() error {
@@ -357,43 +357,98 @@ func (o *Orchestrator) runLive() error {
 			return nil
 		}
 	}
-	if err := recording.Stop(o.ctx); err != nil {
-		_, _ = recording.Release()
+	// Stop may block while final segments are sent. Continue watching the STT
+	// consumer so a fatal result can cancel the producer and release backpressure.
+	stopped := make(chan error, 1)
+	go func() { stopped <- recording.Stop(o.ctx) }()
+	var stopErr error
+	var earlyResult *transcriptionOutcome
+	select {
+	case stopErr = <-stopped:
+	case outcome := <-transcribed:
+		if outcome.err != nil {
+			o.cancelOps()
+			abortErr := recording.Abort()
+			<-stopped
+			<-forwarded
+			// An expected cancellation from Abort must not mask the STT failure.
+			if abortErr != nil && errs.Classify(abortErr) != errs.Cancelled {
+				outcome.err = errors.Join(outcome.err, abortErr)
+			}
+			return o.fail(outcome.err)
+		}
+		// The producer may close normally just before Stop returns.
+		earlyResult = &outcome
+		stopErr = <-stopped
+	}
+	if stopErr != nil {
 		<-forwarded
-		<-transcribed
+		if earlyResult == nil {
+			<-transcribed
+		}
 		if o.machine.Result() != "" {
+			o.finishLiveCapture(recording, "")
 			return nil
 		}
-		if errs.Classify(err) == errs.NoSpeech {
+		if errs.Classify(stopErr) == errs.NoSpeech {
 			_ = o.machine.ApplyTerminal(NoSpeechCommand, o.currentProvider(), errs.NoSpeech)
+			o.finishLiveCapture(recording, "")
 			return nil
 		}
-		return o.fail(err)
+		resultErr := o.fail(stopErr)
+		o.finishLiveCapture(recording, "")
+		return resultErr
 	}
 	if err := o.machine.Apply(CaptureStoppedCommand); err != nil {
-		_, _ = recording.Release()
 		<-forwarded
-		<-transcribed
-		if o.machine.Result() != "" {
-			return nil
+		if earlyResult == nil {
+			<-transcribed
 		}
-		return o.fail(err)
+		resultErr := o.fail(err)
+		o.finishLiveCapture(recording, "")
+		return resultErr
 	}
 	<-forwarded
-	outcome := <-transcribed
-	_, cleanupErr := recording.Release()
-	if outcome.err != nil {
-		outcome.err = errors.Join(outcome.err, cleanupErr)
-	} else if cleanupErr != nil {
-		outcome.result.Warnings = append(outcome.result.Warnings, stt.Warning{
-			Class: errs.AudioFailed, Provider: outcome.result.Provider, Component: "audio", Message: "nettoyage audio dégradé",
-		})
+	var outcome transcriptionOutcome
+	if earlyResult != nil {
+		outcome = *earlyResult
+	} else {
+		outcome = <-transcribed
 	}
 	provider := outcome.result.Provider
 	if outcome.err == nil {
 		o.publish(events.ProviderSelected, provider, "", "", 0, 0)
 	}
-	return o.completeTranscript(outcome.result.Text, provider, outcome.result.Warnings, outcome.err)
+	resultErr := o.completeTranscript(outcome.result.Text, provider, outcome.result.Warnings, outcome.err)
+	o.finishLiveCapture(recording, provider)
+	return resultErr
+}
+
+// A terminal result closes the cancellation window before retention is decided.
+// Release must not run earlier: cancellation during processing would otherwise
+// leave an already-preserved diagnostic WAV behind.
+func (o *Orchestrator) finishCapture(file audio.WavFile, provider string) {
+	if o.machine.Result() == Cancelled {
+		o.recordAudioCleanupWarning(provider, file.Discard())
+		return
+	}
+	_, cleanupErr := file.Release()
+	o.recordAudioCleanupWarning(provider, cleanupErr)
+}
+
+func (o *Orchestrator) finishLiveCapture(recording audio.LiveRecording, provider string) {
+	if o.machine.Result() == Cancelled {
+		o.recordAudioCleanupWarning(provider, recording.Discard())
+		return
+	}
+	_, cleanupErr := recording.Release()
+	o.recordAudioCleanupWarning(provider, cleanupErr)
+}
+
+func (o *Orchestrator) recordAudioCleanupWarning(provider string, err error) {
+	if err != nil {
+		o.addWarning(ResultWarning{Class: errs.AudioFailed, Provider: provider, Component: "audio", Message: "nettoyage audio dégradé"})
+	}
 }
 
 func (o *Orchestrator) completeTranscript(transcript, provider string, warnings []stt.Warning, err error) error {
@@ -470,13 +525,11 @@ func (o *Orchestrator) transcribe(file audio.WavFile) (string, string, []stt.War
 	if o.chunk > 0 {
 		count, err := file.File.SegmentCount(o.chunk, time.Second)
 		if err != nil {
-			_, cleanupErr := file.Release()
-			return "", "", nil, errors.Join(err, cleanupErr)
+			return "", "", nil, err
 		}
 		if limiter, ok := o.transcriber.(interface{ ValidateSegmentCount(int) error }); ok {
 			if err := limiter.ValidateSegmentCount(count); err != nil {
-				_, cleanupErr := file.Release()
-				return "", "", nil, errors.Join(err, cleanupErr)
+				return "", "", nil, err
 			}
 		}
 	}
@@ -484,8 +537,7 @@ func (o *Orchestrator) transcribe(file audio.WavFile) (string, string, []stt.War
 		Duration: o.chunk, MinTail: time.Second, OutputDir: filepath.Dir(file.Path()),
 	})
 	if err != nil {
-		_, cleanupErr := file.Release()
-		return "", "", nil, errors.Join(err, cleanupErr)
+		return "", "", nil, err
 	}
 	requests := make([]stt.Segment, len(segments))
 	for i, segment := range segments {
@@ -495,15 +547,13 @@ func (o *Orchestrator) transcribe(file audio.WavFile) (string, string, []stt.War
 	}
 	result, err := o.transcriber.TranscribeSegments(o.ctx, requests, o.transcriptionProgress(len(segments)))
 	segmentErr := audio.RemoveSegments(segments)
-	_, releaseErr := file.Release()
-	cleanupErr := errors.Join(segmentErr, releaseErr)
 	if err != nil {
-		return "", "", nil, errors.Join(err, cleanupErr)
+		return "", "", nil, errors.Join(err, segmentErr)
 	}
 	provider := result.Provider
 	o.publish(events.ProviderSelected, provider, "", "", 0, 0)
 	warnings := append([]stt.Warning(nil), result.Warnings...)
-	if cleanupErr != nil {
+	if segmentErr != nil {
 		warnings = append(warnings, stt.Warning{Class: errs.AudioFailed, Provider: provider, Component: "audio", Message: "nettoyage audio dégradé"})
 	}
 	return result.Text, provider, warnings, nil

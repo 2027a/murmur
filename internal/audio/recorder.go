@@ -57,6 +57,18 @@ func (f WavFile) Release() (string, error) {
 	return f.cleanup.diagnostic, f.cleanup.err
 }
 
+// Discard closes the recording and removes its temporary capture, regardless
+// of the configured diagnostic retention. Only the first cleanup decision wins.
+func (f WavFile) Discard() error {
+	if f.cleanup == nil {
+		return f.File.Close()
+	}
+	f.cleanup.once.Do(func() {
+		f.cleanup.err = errors.Join(f.File.Close(), removeCapture(f.cleanup.tempDir))
+	})
+	return f.cleanup.err
+}
+
 type cleanupState struct {
 	once       sync.Once
 	tempDir    string
