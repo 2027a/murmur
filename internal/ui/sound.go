@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"git.2027a.net/2027a/murmur/internal/audio/wav"
 	"git.2027a.net/2027a/murmur/internal/events"
 	"git.2027a.net/2027a/murmur/internal/logging"
 	"git.2027a.net/2027a/murmur/internal/sysexec"
@@ -69,6 +70,12 @@ func (s *Sound) Show(event events.Event) {
 	}
 	if play {
 		s.enqueueLocked()
+	}
+}
+
+func (s *Sound) Meter(level wav.Level) {
+	if m, ok := s.next.(interface{ Meter(wav.Level) }); ok {
+		m.Meter(level)
 	}
 }
 

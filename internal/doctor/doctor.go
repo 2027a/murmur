@@ -35,6 +35,7 @@ type Dependencies struct {
 	Runtime         func() error
 	File            func(string) error
 	Notifications   func(context.Context) error
+	QuickShell      func(context.Context) error
 	Executor        sysexec.Executor
 	SecretExecutor  sysexec.Executor
 	Secrets         SecretResolver
@@ -110,6 +111,14 @@ func Run(ctx context.Context, cfg config.Config, dependencies Dependencies) Repo
 	}
 
 	switch cfg.UI.Mode {
+	case "auto", "quickshell":
+		err := timedCheck(ctx, d.ExternalTimeout, d.QuickShell)
+		if err != nil && cfg.UI.Mode == "auto" {
+			report.Checks = append(report.Checks, Check{Name: "UI QuickShell", Status: Skipped, Detail: "module absent ou sans réponse; repli notifications"})
+			add("UI notifications D-Bus", timedCheck(ctx, d.ExternalTimeout, d.Notifications))
+		} else {
+			add("UI QuickShell", err)
+		}
 	case "notify":
 		add("UI notifications D-Bus", timedCheck(ctx, d.ExternalTimeout, d.Notifications))
 	case "osd":
@@ -242,6 +251,15 @@ func withDefaults(cfg config.Config, d Dependencies) Dependencies {
 	}
 	if d.Notifications == nil {
 		d.Notifications = ui.CheckDesktopNotifications
+	}
+	if d.QuickShell == nil {
+		d.QuickShell = func(ctx context.Context) error {
+			runtimeDir, err := xdg.RuntimeDir()
+			if err != nil {
+				return err
+			}
+			return ui.CheckBar(ctx, runtimeDir)
+		}
 	}
 	if d.ExternalTimeout <= 0 {
 		d.ExternalTimeout = DefaultExternalCheckTimeout

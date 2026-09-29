@@ -88,8 +88,8 @@ func Validate(cfg Config) error {
 	if cfg.Sink.Mode == "file" && strings.TrimSpace(cfg.Sink.File) == "" {
 		return configError("sink.file est obligatoire lorsque sink.mode vaut file")
 	}
-	if !oneOf(cfg.UI.Mode, "osd", "notify", "none") {
-		return configError("ui.mode doit valoir osd, notify ou none")
+	if !oneOf(cfg.UI.Mode, "auto", "quickshell", "osd", "notify", "none") {
+		return configError("ui.mode doit valoir auto, quickshell, osd, notify ou none")
 	}
 	if strings.TrimSpace(cfg.UI.OSD.Helper) == "" {
 		return configError("ui.osd.helper ne peut pas être vide")

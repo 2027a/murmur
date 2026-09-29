@@ -72,7 +72,7 @@ déterministe afin que toutes les commandes retrouvent la même session.
 | `sink.paste_shortcuts` | liste usuelle | liste ordonnée parmi `ctrl+shift+v`, `shift+insert`, `ctrl+v`; seul le premier raccourci est émis |
 | `sink.type_newlines` | `space` | `space`, `marker`, `dangerous-keep`; ce dernier autorise explicitement les LF en injection active |
 | `sink.file` | vide | obligatoire pour le sink `file` |
-| `ui.mode` | `notify` | `osd`, `notify`, `none` |
+| `ui.mode` | `notify` | `auto`, `quickshell`, `osd`, `notify`, `none` |
 | `ui.sound` | `false` | bips best-effort au début et à l'arrêt de la capture |
 | `ui.osd.helper` | `murmur-osd` | commande ou chemin du helper OSD |
 | `ui.osd.position` | `top-center` | `top-left`, `top-center`, `center` |

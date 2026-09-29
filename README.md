@@ -362,6 +362,14 @@ nouvelle session peut démarrer.
 
 ## UI
 
+`ui.mode="auto"` utilise le module de barre QuickShell lorsqu'il répond, sinon
+les notifications. Le repli et la reconnexion fonctionnent pendant la session,
+y compris lors d'un traitement long. `ui.mode="quickshell"` impose la barre :
+son absence est signalée par `doctor` et dans les logs, sans bloquer la dictée.
+Le module lance un unique `murmur ui`, partagé entre les écrans, et affiche un
+vumètre réel mesuré sur la capture existante. Ni audio ni transcript ne passent
+dans le flux UI. Voir le [protocole QuickShell](docs/quickshell.md).
+
 `ui.mode="notify"` utilise les notifications freedesktop, remplace la
 notification précédente et se dégrade en no-op si D-Bus est absent. Le titre
 est « Murmur », précédé d'un rond vert, orange en cas d'annulation et rouge en

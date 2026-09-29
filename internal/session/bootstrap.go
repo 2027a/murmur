@@ -8,12 +8,14 @@ import (
 	"git.2027a.net/2027a/murmur/internal/errs"
 	"git.2027a.net/2027a/murmur/internal/events"
 	"git.2027a.net/2027a/murmur/internal/ipc"
+	"git.2027a.net/2027a/murmur/internal/ui"
 )
 
 type BootstrapOptions struct {
 	Context   context.Context
 	SessionID string
 	Bus       *events.Bus
+	UI        ui.UI
 	Now       func() time.Time
 }
 
@@ -41,7 +43,7 @@ func NewBootstrap(options BootstrapOptions) (*Bootstrap, error) {
 		options.Now = time.Now
 	}
 	ctx, cancel := context.WithCancel(options.Context)
-	machine := NewMachine(options.SessionID, newPublicationGate(eventPublisher{bus: options.Bus}))
+	machine := NewMachine(options.SessionID, newPublicationGate(eventPublisher{bus: options.Bus, ui: options.UI}))
 	machine.now = options.Now
 	b := &Bootstrap{
 		machine: machine, ctx: ctx, cancel: cancel,

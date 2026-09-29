@@ -18,6 +18,7 @@ import (
 	"git.2027a.net/2027a/murmur/internal/errs"
 	"git.2027a.net/2027a/murmur/internal/ipc"
 	"git.2027a.net/2027a/murmur/internal/session"
+	"git.2027a.net/2027a/murmur/internal/ui"
 	"git.2027a.net/2027a/murmur/internal/xdg"
 )
 
@@ -30,6 +31,7 @@ Commandes:
   toggle [--clipboard-only] démarrer ou arrêter l'écoute
   status [--json]           afficher l'état courant
   doctor [--json]           vérifier la configuration effective
+  ui                       flux JSONL pour le module QuickShell (accusés sur stdin)
   transcribe [--json] [--events] <fichier.wav>
                             transcrire un WAV sans capture desktop
   cleanup [--json] [--events]
@@ -103,6 +105,15 @@ func (app App) Run(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return app.cleanupCommand(ctx, args[1:], stdout, stderr)
 	case "dictate":
 		return app.dictateCommand(ctx, args[1:], stdout, stderr)
+	case "ui":
+		if !noFlags("ui", args[1:]) {
+			return usageError(stderr, "usage invalide pour ui")
+		}
+		var runtimeDir string
+		runtimeDir, err = app.runtime()
+		if err == nil {
+			err = ui.ServeBar(ctx, runtimeDir, app.stdin(), stdout)
+		}
 	case "__session":
 		err = app.runSession(ctx, args[1:], stdout)
 	default:

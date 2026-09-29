@@ -32,6 +32,8 @@ type RecordOptions struct {
 	ReadinessInterval time.Duration
 	MinimumDuration   time.Duration
 	Retention         RetentionOptions
+	// Meter must return immediately; it runs independently of capture/STT.
+	Meter func(wav.Level)
 }
 
 type WavFile struct {

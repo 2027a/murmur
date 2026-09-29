@@ -52,6 +52,7 @@ type Notify struct {
 	terminalSeen bool
 	activeCancel context.CancelFunc
 	activeTerm   bool
+	dismiss      bool
 }
 
 func NewNotify(client NotificationClient, warn WarnFunc) *Notify {
@@ -146,12 +147,37 @@ func (u *Notify) Close() {
 	})
 }
 
+// Dismiss removes a fallback notification when the bar has recovered.
+func (u *Notify) Dismiss() {
+	u.mu.Lock()
+	u.dismiss = true
+	u.pending = nil
+	u.mu.Unlock()
+	select {
+	case u.wake <- struct{}{}:
+	default:
+	}
+}
+
 func (u *Notify) run() {
 	defer close(u.done)
 	defer u.client.Close()
 	var replacesID uint32
 	for {
 		u.mu.Lock()
+		if u.dismiss {
+			u.dismiss = false
+			u.mu.Unlock()
+			if client, ok := u.client.(interface {
+				Dismiss(context.Context, uint32) error
+			}); ok && replacesID != 0 {
+				ctx, cancel := context.WithTimeout(u.ctx, u.callTimeout)
+				_ = client.Dismiss(ctx, replacesID)
+				cancel()
+			}
+			replacesID = 0
+			continue
+		}
 		request := u.pending
 		u.pending = nil
 		if request == nil {
@@ -319,4 +345,8 @@ func (c *DBusNotificationClient) Close() error {
 	}
 	c.conn.Close()
 	return nil
+}
+
+func (c *DBusNotificationClient) Dismiss(ctx context.Context, id uint32) error {
+	return c.obj.CallWithContext(ctx, "org.freedesktop.Notifications.CloseNotification", 0, id).Err
 }

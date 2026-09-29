@@ -9,6 +9,7 @@ import (
 
 	"git.2027a.net/2027a/murmur/internal/audio"
 	"git.2027a.net/2027a/murmur/internal/audio/pwrecord"
+	"git.2027a.net/2027a/murmur/internal/audio/wav"
 	"git.2027a.net/2027a/murmur/internal/config"
 	"git.2027a.net/2027a/murmur/internal/core"
 	"git.2027a.net/2027a/murmur/internal/errs"
@@ -78,26 +79,17 @@ func Build(options BuildOptions) (*Orchestrator, error) {
 	}
 	userInterface := options.UI
 	if userInterface == nil {
-		switch options.Config.UI.Mode {
-		case "notify":
-			userInterface = ui.NewDesktopNotifications(nil)
-		case "osd":
-			closeTimeout := time.Duration(max(options.Config.UI.OSD.SuccessTimeoutMS, options.Config.UI.OSD.ErrorTimeoutMS))*time.Millisecond + ui.OSDHelperExitGrace
-			userInterface = ui.NewOSD(executor, ui.OSDOptions{
-				Helper:       options.Config.UI.OSD.Helper,
-				CloseTimeout: closeTimeout,
-				Args: []string{
-					"--position", options.Config.UI.OSD.Position,
-					"--success-timeout-ms", strconv.Itoa(options.Config.UI.OSD.SuccessTimeoutMS),
-					"--error-timeout-ms", strconv.Itoa(options.Config.UI.OSD.ErrorTimeoutMS),
-				},
-			})
-		default:
-			userInterface = ui.NewNone()
+		userInterface = BuildUI(options.Config, options.RuntimeDir, options.ClipboardOnly, executor)
+	} else if options.Config.UI.Sound {
+		if _, wrapped := userInterface.(*ui.Sound); !wrapped {
+			userInterface = ui.NewSound(userInterface, executor, "", nil)
 		}
 	}
-	if options.Config.UI.Sound {
-		userInterface = ui.NewSound(userInterface, executor, "", nil)
+	var meter func(wav.Level)
+	if options.Config.UI.Mode == "auto" || options.Config.UI.Mode == "quickshell" {
+		if m, ok := userInterface.(interface{ Meter(wav.Level) }); ok {
+			meter = m.Meter
+		}
 	}
 	recorder := options.Recorder
 	if recorder == nil {
@@ -107,6 +99,7 @@ func Build(options BuildOptions) (*Orchestrator, error) {
 		Context: options.Context, SessionID: options.SessionID, RuntimeDir: options.RuntimeDir,
 		Recorder: recorder, RecordOptions: audio.RecordOptions{
 			Directory: options.RuntimeDir, Target: options.Config.Audio.Source,
+			Meter:     meter,
 			Retention: audio.RetentionOptions{Keep: options.Config.Audio.KeepRecordings || options.Config.Policy.RetainDiagnostics},
 		},
 		ChunkDuration:    time.Duration(options.Config.STT.ChunkSeconds) * time.Second,
@@ -117,6 +110,38 @@ func Build(options BuildOptions) (*Orchestrator, error) {
 		Transcriber:      chain, Processor: processor, Sink: delivery, UI: userInterface, Bus: options.Bus,
 		Machine: machine, StartedAt: startedAt,
 	})
+}
+
+// BuildUI also serves bootstrap so slow credentials/provider setup is visible.
+func BuildUI(cfg config.Config, runtimeDir string, clipboardOnly bool, executor sysexec.Executor) ui.UI {
+	executor, _ = processExecutors(cfg, executor, nil)
+	var userInterface ui.UI
+	switch cfg.UI.Mode {
+	case "auto", "quickshell":
+		var fallback ui.UI
+		if cfg.UI.Mode == "auto" {
+			fallback = ui.NewDesktopNotifications(nil)
+		}
+		delivery := cfg.Sink.Mode
+		if clipboardOnly {
+			delivery = "clipboard"
+		}
+		userInterface = ui.NewBar(ui.BarSocket(runtimeDir), delivery, cfg.Cleanup.Enabled, fallback, nil)
+	case "notify":
+		userInterface = ui.NewDesktopNotifications(nil)
+	case "osd":
+		closeTimeout := time.Duration(max(cfg.UI.OSD.SuccessTimeoutMS, cfg.UI.OSD.ErrorTimeoutMS))*time.Millisecond + ui.OSDHelperExitGrace
+		userInterface = ui.NewOSD(executor, ui.OSDOptions{
+			Helper: cfg.UI.OSD.Helper, CloseTimeout: closeTimeout,
+			Args: []string{"--position", cfg.UI.OSD.Position, "--success-timeout-ms", strconv.Itoa(cfg.UI.OSD.SuccessTimeoutMS), "--error-timeout-ms", strconv.Itoa(cfg.UI.OSD.ErrorTimeoutMS)},
+		})
+	default:
+		userInterface = ui.NewNone()
+	}
+	if cfg.UI.Sound {
+		userInterface = ui.NewSound(userInterface, executor, "", nil)
+	}
+	return userInterface
 }
 
 func processExecutors(cfg config.Config, executor, secretExecutor sysexec.Executor) (sysexec.Executor, sysexec.Executor) {

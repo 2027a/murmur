@@ -87,6 +87,8 @@ type_newlines = "space"
 file = ""
 
 [ui]
+# auto : module QuickShell fonctionnel, sinon notifications.
+# quickshell : barre imposée; notify : notifications imposées.
 mode = "notify"
 sound = false
 

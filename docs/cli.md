@@ -9,6 +9,7 @@ murmur cancel
 murmur toggle [--clipboard-only]
 murmur status [--json]
 murmur doctor [--json]
+murmur ui
 murmur transcribe [--json] [--events] <fichier.wav>
 murmur cleanup [--json] [--events]
 murmur dictate [--sink stdout|file] [--json] [--events]
@@ -40,6 +41,14 @@ session lorsqu'aucun socket n'existe, et est refusé dans les autres états
 actifs. `toggle --clipboard-only` applique la garantie clipboard-only lors du
 démarrage; si une session est déjà en écoute, le flag ne change pas son mode et
 la commande l'arrête normalement.
+
+## Flux de barre QuickShell
+
+`murmur ui` est un processus persistant lancé par le module QML, avec stdin
+ouvert. Il transmet des instantanés JSONL sur stdout et attend leur numéro
+`seq` suivi d'un retour à la ligne sur stdin. Il ne démarre aucune capture.
+Le processus appartient au shell, pas à une dictée; EOF sur stdin le termine.
+Les détails et limites sont dans [quickshell.md](quickshell.md).
 
 ## Status et doctor
 

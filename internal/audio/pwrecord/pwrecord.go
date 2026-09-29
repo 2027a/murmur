@@ -74,6 +74,9 @@ func (r *Recorder) Start(ctx context.Context, opts audio.RecordOptions) (audio.R
 	go recording.waitProcess()
 	go recording.watchReadiness(ctx)
 	go recording.watchCancellation(ctx)
+	if normalized.Meter != nil {
+		go recording.watchLevels(ctx)
+	}
 	return recording, nil
 }
 

@@ -27,6 +27,7 @@ DOC_FILES := \
 	osd-protocol.md \
 	production-migration.md \
 	providers.md \
+	quickshell.md \
 	session.md \
 	sinks.md \
 	text-pipeline.md

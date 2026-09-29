@@ -71,6 +71,8 @@ Checks ajoutes selon la configuration:
 | `sink.mode=clipboard` | `wl-copy` |
 | `sink.mode=file` | fichier existant inscriptible ou parent permettant sa creation |
 | `ui.mode=notify` | bus de session et `org.freedesktop.Notifications` joignables |
+| `ui.mode=auto` | acquittement du module QuickShell; à défaut, vérification des notifications |
+| `ui.mode=quickshell` | acquittement du module QuickShell obligatoire, sans repli |
 | `ui.mode=osd` | helper `ui.osd.helper` présent et `<helper> --check` réussi |
 | `ui.sound=true` | au moins un de `pw-play`, `paplay`, `canberra-gtk-play` |
 

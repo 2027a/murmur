@@ -247,15 +247,17 @@ func (app App) runSession(ctx context.Context, args []string, stdout io.Writer) 
 	if err := session.MarkLastResultPending(runtimeDir, sessionID); err != nil {
 		return err
 	}
+	userInterface := session.BuildUI(cfg, runtimeDir, snapshot.ClipboardOnly, nil)
+	defer userInterface.Close()
 	bootstrap, err := session.NewBootstrap(session.BootstrapOptions{
-		Context: ctx, SessionID: sessionID, Bus: bus,
+		Context: ctx, SessionID: sessionID, Bus: bus, UI: userInterface,
 	})
 	if err != nil {
 		return err
 	}
 	orchestrator, err := session.Build(session.BuildOptions{
 		Context: bootstrap.Context(), Config: cfg, RuntimeDir: runtimeDir, SessionID: sessionID,
-		ClipboardOnly: snapshot.ClipboardOnly, Stdout: stdout, Bus: bus, Bootstrap: bootstrap,
+		ClipboardOnly: snapshot.ClipboardOnly, Stdout: stdout, Bus: bus, Bootstrap: bootstrap, UI: userInterface,
 	})
 	if err != nil {
 		result := bootstrap.Finish(err, "")
