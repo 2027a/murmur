@@ -24,12 +24,13 @@ const (
 	Degraded         Type = "degraded"
 	Delivered        Type = "delivered"
 	Terminal         Type = "terminal"
+	TimingRecorded   Type = "timing"
 )
 
 var validTypes = map[Type]struct{}{
 	SessionStarted: {}, CaptureReady: {}, StateChanged: {}, PartialStarted: {},
 	PartialDone: {}, PartialFailed: {}, ProviderSelected: {}, Degraded: {},
-	Delivered: {}, Terminal: {},
+	Delivered: {}, Terminal: {}, TimingRecorded: {},
 }
 
 // Event intentionally has no transcript or arbitrary message field.
@@ -45,6 +46,7 @@ type Event struct {
 	Component  string     `json:"component,omitempty"`
 	Partial    int        `json:"partial,omitempty"`
 	Total      int        `json:"total,omitempty"`
+	Timing     *Timing    `json:"timing,omitempty"`
 }
 
 func (e Event) Validate() error {
@@ -63,7 +65,30 @@ func (e Event) Validate() error {
 	if e.Partial < 0 || e.Total < 0 || e.Partial > 0 && e.Total > 0 && e.Partial > e.Total {
 		return fmt.Errorf("index partiel invalide")
 	}
+	if e.Type != TimingRecorded && e.Timing != nil {
+		return fmt.Errorf("mesure sur un événement incompatible")
+	}
 	switch e.Type {
+	case TimingRecorded:
+		if e.Timing == nil || e.State == "" || e.Result != "" || e.Component != "" || e.ErrorClass != "" || e.Total != 0 {
+			return fmt.Errorf("événement de mesure incohérent")
+		}
+		t := e.Timing
+		if t.DurationMS < 0 || t.QueueMS < 0 || t.AudioMS < 0 {
+			return fmt.Errorf("durée de mesure négative")
+		}
+		switch t.Stage {
+		case "stt":
+			if e.Provider == "" || e.Partial < 1 {
+				return fmt.Errorf("mesure STT sans provenance")
+			}
+		case "capture_ready", "cleanup", "processing", "delivery", "after_stop", "stt_complete":
+			if e.Provider != "" || e.Partial != 0 || t.QueueMS != 0 || t.AudioMS != 0 {
+				return fmt.Errorf("mesure globale incohérente")
+			}
+		default:
+			return fmt.Errorf("étape de mesure inconnue")
+		}
 	case SessionStarted, CaptureReady:
 		if e.State == "" || e.Result != "" || e.Provider != "" || e.ErrorClass != "" || e.Component != "" || e.Partial != 0 || e.Total != 0 {
 			return fmt.Errorf("événement d'état incohérent")

@@ -109,9 +109,12 @@ func Build(options BuildOptions) (*Orchestrator, error) {
 			Directory: options.RuntimeDir, Target: options.Config.Audio.Source,
 			Retention: audio.RetentionOptions{Keep: options.Config.Audio.KeepRecordings || options.Config.Policy.RetainDiagnostics},
 		},
-		ChunkDuration: time.Duration(options.Config.STT.ChunkSeconds) * time.Second,
-		LiveChunking:  options.Config.STT.LiveChunking,
-		Transcriber:   chain, Processor: processor, Sink: delivery, UI: userInterface, Bus: options.Bus,
+		ChunkDuration:    time.Duration(options.Config.STT.ChunkSeconds) * time.Second,
+		ChunkPauseWindow: time.Duration(options.Config.STT.ChunkPauseMS) * time.Millisecond,
+		ChunkOverlap:     time.Duration(options.Config.STT.ChunkOverlapMS) * time.Millisecond,
+		MaxSegments:      options.Config.STT.MaxSegments,
+		LiveChunking:     options.Config.STT.LiveChunking,
+		Transcriber:      chain, Processor: processor, Sink: delivery, UI: userInterface, Bus: options.Bus,
 		Machine: machine, StartedAt: startedAt,
 	})
 }

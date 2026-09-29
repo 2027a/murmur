@@ -46,9 +46,11 @@ déterministe afin que toutes les commandes retrouvent la même session.
 | `audio.keep_recordings` | `false` | conservation diagnostique opt-in |
 | `stt.provider` | `local` | nom dans `stt.providers` |
 | `stt.fallback` | vide | nom optionnel dans `stt.providers` |
-| `stt.chunk_seconds` | `0` | de 0 à 86400 s; 0 désactive le découpage |
-| `stt.live_chunking` | `false` | snapshots et STT pendant la capture; exige `chunk_seconds > 0` |
-| `stt.chunk_workers` | `2` | concurrence STT live bornée, de 1 à 64 |
+| `stt.chunk_seconds` | `5` | de 0 à 86400 s; 0 désactive le découpage et le live implicite |
+| `stt.live_chunking` | `true` | snapshots et STT pendant la capture des sessions; exige `chunk_seconds > 0` |
+| `stt.chunk_pause_ms` | `500` | recherche d'une pause avant la coupe, de 0 à 1000 ms et strictement inférieure au segment; 0 = fixe |
+| `stt.chunk_overlap_ms` | `0` | PCM précédent ajouté au segment, de 0 à 1000 ms et strictement inférieur à `chunk_seconds*1000 - chunk_pause_ms`; expérimental |
+| `stt.chunk_workers` | `2` | concurrence STT batch et live bornée, de 1 à 64 |
 | `stt.max_text_bytes` | `16777216` | budget cumulé des textes STT en octets UTF-8, de 1 à 67108864 |
 | `stt.max_segments` | `4096` | nombre maximal de segments conservés, de 1 à 65536 |
 | `stt.allow_partial` | `false` | récupération partielle explicite avec warning |
@@ -305,12 +307,26 @@ en cours.
 
 ## Découpage live
 
-Le mode live est entièrement opt-in. Avec `live_chunking = false`, le chemin
+Le mode live est actif par défaut pour les sessions, avec des fenêtres de 5 s.
+Une valeur explicite existante reste inchangée. `chunk_seconds=0` désactive le
+live si `live_chunking` n'a pas été précisé; `live_chunking=true` explicite avec
+une durée nulle reste une erreur de configuration. Avec `live_chunking = false`, le chemin
 reste celui du découpage post-capture historique: une capture unique, puis
 `audio.Chunk`, ou un seul fichier sans copie quand `chunk_seconds = 0`.
 
-En mode live, `chunk_seconds` devient la taille des plages PCM extraites du WAV
-écrit par l'unique `pw-record`. Au plus
+Les clés `chunk_pause_ms` et `chunk_overlap_ms` s'appliquent aussi au batch et aux
+commandes composables. Leurs overrides d'environnement sont
+`MURMUR_STT_CHUNK_PAUSE_MS` et `MURMUR_STT_CHUNK_OVERLAP_MS`. Une durée nulle de
+segment ignore ces réglages. Le détecteur de pause utilise 200 ms d'énergie RMS
+faible, dans la fenêtre précédant la coupe, sans suppression d'audio. Le
+recouvrement est ajouté avant le curseur, sans réduire le pas nominal; il peut
+donc augmenter la durée transmise au provider. L'assemblage ne déduplique que des
+segments adjacents marqués comme recouvrants. Voir [audio.md](audio.md).
+
+En mode live, `chunk_seconds` devient le pas cible des plages PCM extraites du WAV
+écrit par l'unique `pw-record`. Une seconde de PCM supplémentaire suffit à émettre
+un segment; aucun segment complet n'est retenu ni retranscrit pour fusionner une
+petite fin. Au plus
 `chunk_workers` appels STT sont demandés. La limite effective est le minimum de
 ce réglage et de `ceil(max_text_bytes / 4194304)`: puisque chaque réponse peut
 atteindre 4 Mio, les corps en vol restent ainsi du même ordre de grandeur que le
@@ -323,7 +339,10 @@ segment; chaque provider reste présent dans `MultiResult.Segments` et un
 `WarningMixedProviders` est ajouté si plusieurs providers ont contribué. La
 provenance globale vaut alors `mixed`, quel que soit leur ordre.
 Sans cet opt-in, le premier échec du principal relance tous les segments sur le
-fallback, ce qui évite un transcript implicitement mixte.
+fallback, ce qui évite un transcript implicitement mixte. Le batch utilise aussi
+le pool lorsque `chunk_workers>1`; avec un worker, il conserve son arrêt anticipé
+sur erreur. Le live doit toujours recevoir le reste de la capture pour un replay
+complet éventuel.
 
 `max_text_bytes` compte `len(text)` pour chaque réponse réussie, donc les octets
 de son encodage UTF-8 en Go, ainsi que les espaces ajoutés entre réponses. Le
@@ -337,7 +356,9 @@ jamais de résultat partiel, même avec `allow_partial=true`.
 Les canaux bornés ne limitent que la file instantanée. `max_segments` borne en
 plus les slices de requêtes, les maps de résultats et les fichiers nécessaires à
 un éventuel fallback. Son dépassement suit la même politique sans livraison,
-avec le message `nombre de segments STT supérieur à la limite configurée`. Une
+avec le message `nombre de segments STT supérieur à la limite configurée` (ou
+`nombre de segments audio supérieur à la limite configurée` si le producteur
+live atteint sa borne avant le pool). Une
 limite de durée séparée n'est pas nécessaire: en mode segmenté, le nombre de
 fenêtres fixes borne déjà la durée, à l'éventuel reliquat final fusionné près;
 sans découpage, une session ne produit qu'une réponse soumise au budget de texte.

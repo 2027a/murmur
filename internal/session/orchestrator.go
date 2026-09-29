@@ -32,21 +32,24 @@ type Processor interface {
 }
 
 type OrchestratorOptions struct {
-	Context       context.Context
-	SessionID     string
-	RuntimeDir    string
-	Recorder      audio.Recorder
-	RecordOptions audio.RecordOptions
-	ChunkDuration time.Duration
-	LiveChunking  bool
-	Transcriber   Transcriber
-	Processor     Processor
-	Sink          sink.Sink
-	UI            ui.UI
-	Bus           *events.Bus
-	Now           func() time.Time
-	Machine       *Machine
-	StartedAt     time.Time
+	Context          context.Context
+	SessionID        string
+	RuntimeDir       string
+	Recorder         audio.Recorder
+	RecordOptions    audio.RecordOptions
+	ChunkDuration    time.Duration
+	ChunkPauseWindow time.Duration
+	ChunkOverlap     time.Duration
+	MaxSegments      int
+	LiveChunking     bool
+	Transcriber      Transcriber
+	Processor        Processor
+	Sink             sink.Sink
+	UI               ui.UI
+	Bus              *events.Bus
+	Now              func() time.Time
+	Machine          *Machine
+	StartedAt        time.Time
 }
 
 type Orchestrator struct {
@@ -55,6 +58,9 @@ type Orchestrator struct {
 	recorder    audio.Recorder
 	recordOpts  audio.RecordOptions
 	chunk       time.Duration
+	pauseWindow time.Duration
+	overlap     time.Duration
+	maxSegments int
 	live        bool
 	transcriber Transcriber
 	processor   Processor
@@ -63,6 +69,7 @@ type Orchestrator struct {
 	bus         *events.Bus
 	now         func() time.Time
 	startedAt   time.Time
+	runStarted  time.Time
 	parentCtx   context.Context
 
 	ctx        context.Context
@@ -77,6 +84,7 @@ type Orchestrator struct {
 	runResult  LastResult
 	runErr     error
 	persistErr error
+	stopAt     time.Time
 }
 
 type eventPublisher struct {
@@ -88,7 +96,7 @@ func (p eventPublisher) Publish(event events.Event) {
 	if p.bus != nil {
 		p.bus.Publish(event)
 	}
-	if p.ui != nil {
+	if p.ui != nil && event.Type != events.TimingRecorded {
 		p.ui.Show(event)
 	}
 }
@@ -113,7 +121,9 @@ func NewOrchestrator(options OrchestratorOptions) (*Orchestrator, error) {
 	o := &Orchestrator{
 		runtimeDir: options.RuntimeDir, recorder: options.Recorder, recordOpts: options.RecordOptions,
 		chunk: options.ChunkDuration, live: options.LiveChunking, transcriber: options.Transcriber, processor: options.Processor,
-		sink: sink.Once(options.Sink), ui: options.UI, bus: options.Bus, now: options.Now,
+		pauseWindow: options.ChunkPauseWindow, maxSegments: options.MaxSegments,
+		overlap: options.ChunkOverlap,
+		sink:    sink.Once(options.Sink), ui: options.UI, bus: options.Bus, now: options.Now,
 		ctx: ctx, cancelOps: cancel, stop: make(chan struct{}, 1), runDone: make(chan struct{}),
 		startedAt: options.StartedAt, parentCtx: options.Context,
 	}
@@ -127,6 +137,12 @@ func NewOrchestrator(options OrchestratorOptions) (*Orchestrator, error) {
 	} else {
 		o.machine.SetPublisher(eventPublisher{bus: options.Bus, ui: options.UI})
 	}
+	o.ctx = events.WithTimings(o.ctx, func(timing events.Timing, provider string, partial int) {
+		o.machine.Publish(events.Event{
+			Version: 1, Type: events.TimingRecorded, Timestamp: o.now().UTC(), SessionID: o.machine.sessionID,
+			State: string(o.machine.State()), Provider: provider, Partial: partial, Timing: &timing,
+		})
+	})
 	go func() {
 		select {
 		case <-options.Context.Done():
@@ -177,6 +193,7 @@ func (o *Orchestrator) Run() (LastResult, error, error) {
 }
 
 func (o *Orchestrator) run() error {
+	o.runStarted = time.Now()
 	if o.live {
 		return o.runLive()
 	}
@@ -184,6 +201,7 @@ func (o *Orchestrator) run() error {
 }
 
 func (o *Orchestrator) runCaptured() error {
+	readyTiming := events.Measure(o.ctx, "capture_ready")
 	recording, err := o.recorder.Start(o.ctx, o.recordOpts)
 	if err != nil {
 		return o.fail(err)
@@ -212,6 +230,7 @@ func (o *Orchestrator) runCaptured() error {
 		}
 		return o.fail(err)
 	}
+	readyTiming()
 	if o.machine.State() == Recording {
 		select {
 		case <-o.stop:
@@ -255,6 +274,7 @@ func (o *Orchestrator) runCaptured() error {
 }
 
 func (o *Orchestrator) runLive() error {
+	readyTiming := events.Measure(o.ctx, "capture_ready")
 	recorder, ok := o.recorder.(audio.LiveRecorder)
 	if !ok {
 		return o.fail(errs.New(errs.Internal, "session", "recorder incompatible avec le découpage live"))
@@ -266,6 +286,9 @@ func (o *Orchestrator) runLive() error {
 	recording, err := recorder.StartLive(o.ctx, o.recordOpts, audio.LiveOptions{
 		SegmentDuration: o.chunk,
 		MinimumTail:     time.Second,
+		PauseWindow:     o.pauseWindow,
+		Overlap:         o.overlap,
+		MaxSegments:     o.maxSegments,
 	})
 	if err != nil {
 		return o.fail(err)
@@ -294,6 +317,7 @@ func (o *Orchestrator) runLive() error {
 		}
 		return o.fail(err)
 	}
+	readyTiming()
 
 	requests := make(chan stt.Segment)
 	forwarded := make(chan struct{})
@@ -301,7 +325,7 @@ func (o *Orchestrator) runLive() error {
 		defer close(forwarded)
 		defer close(requests)
 		for segment := range recording.Segments() {
-			request := stt.Segment{Index: segment.Index, Request: stt.Request{
+			request := stt.Segment{Index: segment.Index, QueuedAt: segment.CreatedAt, Overlap: segment.Overlap, Request: stt.Request{
 				Audio: segment.File, Filename: filepath.Base(segment.File.Path()),
 			}}
 			select {
@@ -325,8 +349,8 @@ func (o *Orchestrator) runLive() error {
 		select {
 		case <-o.stop:
 		case outcome := <-transcribed:
+			o.cancelOps()
 			if stt.IsLimitExceeded(outcome.err) {
-				o.cancelOps()
 				abortErr := recording.Abort()
 				<-forwarded
 				return o.fail(errors.Join(outcome.err, abortErr))
@@ -452,6 +476,7 @@ func (o *Orchestrator) recordAudioCleanupWarning(provider string, err error) {
 }
 
 func (o *Orchestrator) completeTranscript(transcript, provider string, warnings []stt.Warning, err error) error {
+	events.ReportTiming(o.ctx, events.Timing{Stage: "stt_complete", DurationMS: time.Since(o.runStarted).Milliseconds()}, "", 0)
 	if err != nil {
 		provider = stt.ProviderFromError(err)
 		o.setProvider(provider)
@@ -504,17 +529,27 @@ func (o *Orchestrator) completeTranscript(transcript, provider string, warnings 
 		}
 		return o.fail(err)
 	}
+	deliveryTiming := events.Measure(o.ctx, "delivery")
 	if raw, ok := o.sink.(interface {
 		CopyRaw(context.Context, string) error
 	}); ok {
 		if err := raw.CopyRaw(o.ctx, transcript); err != nil {
+			deliveryTiming()
 			return o.fail(err)
 		}
 	}
 	if err := o.sink.Deliver(o.ctx, processed.Text); err != nil {
+		deliveryTiming()
 		return o.fail(err)
 	}
+	deliveryTiming()
 	o.publish(events.Delivered, provider, "", "", 0, 0)
+	o.metadataMu.Lock()
+	stopAt := o.stopAt
+	o.metadataMu.Unlock()
+	if !stopAt.IsZero() {
+		events.ReportTiming(o.ctx, events.Timing{Stage: "after_stop", DurationMS: time.Since(stopAt).Milliseconds()}, "", 0)
+	}
 	if err := o.machine.ApplyTerminal(DeliveryDoneCommand, provider, ""); err != nil {
 		return o.fail(err)
 	}
@@ -533,15 +568,17 @@ func (o *Orchestrator) transcribe(file audio.WavFile) (string, string, []stt.War
 			}
 		}
 	}
-	segments, err := audio.Chunk(file.File, audio.ChunkOptions{
-		Duration: o.chunk, MinTail: time.Second, OutputDir: filepath.Dir(file.Path()),
-	})
+	options := audio.ChunkOptions{Duration: o.chunk, MinTail: time.Second, OutputDir: filepath.Dir(file.Path()), PauseWindow: o.pauseWindow, Overlap: o.overlap}
+	if limiter, ok := o.transcriber.(interface{ ValidateSegmentCount(int) error }); ok {
+		options.ValidateCount = limiter.ValidateSegmentCount
+	}
+	segments, err := audio.Chunk(file.File, options)
 	if err != nil {
 		return "", "", nil, err
 	}
 	requests := make([]stt.Segment, len(segments))
 	for i, segment := range segments {
-		requests[i] = stt.Segment{Index: segment.Index, Request: stt.Request{
+		requests[i] = stt.Segment{Index: segment.Index, Overlap: segment.Overlap, Request: stt.Request{
 			Audio: segment.File, Filename: filepath.Base(segment.File.Path()),
 		}}
 	}
@@ -581,7 +618,7 @@ func (o *Orchestrator) Handle(_ context.Context, request ipc.Request) ipc.Respon
 		if err := o.machine.Apply(StopCommand); err != nil {
 			return ipc.Failure(err)
 		}
-		o.stopOnce.Do(func() { o.stop <- struct{}{} })
+		o.requestStop()
 		return ipc.Success(string(o.machine.State()))
 	case ipc.Cancel:
 		if err := o.cancel(); err != nil {
@@ -592,11 +629,20 @@ func (o *Orchestrator) Handle(_ context.Context, request ipc.Request) ipc.Respon
 		if err := o.machine.Apply(ToggleCommand); err != nil {
 			return ipc.Failure(err)
 		}
-		o.stopOnce.Do(func() { o.stop <- struct{}{} })
+		o.requestStop()
 		return ipc.Success(string(o.machine.State()))
 	default:
 		return ipc.Failure(errs.New(errs.ConfigInvalid, "session", "commande IPC non gérée"))
 	}
+}
+
+func (o *Orchestrator) requestStop() {
+	o.stopOnce.Do(func() {
+		o.metadataMu.Lock()
+		o.stopAt = time.Now()
+		o.metadataMu.Unlock()
+		o.stop <- struct{}{}
+	})
 }
 
 func (o *Orchestrator) cancel() error {
@@ -627,6 +673,9 @@ func (o *Orchestrator) fail(err error) error {
 }
 
 func audioRecordingFailure(err error) error {
+	if errors.Is(err, audio.ErrSegmentLimit) {
+		return err
+	}
 	if errs.Classify(err) == errs.AudioFailed {
 		return err
 	}

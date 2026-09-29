@@ -364,6 +364,9 @@ func (u *OSD) killProcess() {
 }
 
 func OSDPayloadFromEvent(event events.Event) (OSDPayload, bool) {
+	if backgroundProgress(event) {
+		return OSDPayload{}, false
+	}
 	payload := OSDPayload{
 		Version:    1,
 		State:      event.State,

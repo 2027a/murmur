@@ -13,6 +13,7 @@ import (
 
 	"git.2027a.net/2027a/murmur/internal/audio/wav"
 	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/events"
 	"git.2027a.net/2027a/murmur/internal/policy"
 )
 
@@ -60,14 +61,18 @@ type Config struct {
 }
 
 type Segment struct {
-	Index   int
-	Request Request
+	Index    int
+	Request  Request
+	QueuedAt time.Time
+	Overlap  bool
 }
 
 type SegmentResult struct {
-	Index    int
-	Text     string
-	Provider string
+	Index        int
+	Text         string
+	Provider     string
+	Overlap      bool
+	OverlapWords int
 }
 
 type MultiResult struct {
@@ -254,6 +259,20 @@ func (c *Chain) TranscribeSegments(ctx context.Context, segments []Segment, prog
 	ordered, err := validateSegments(segments)
 	if err != nil {
 		return MultiResult{}, err
+	}
+	queuedAt := time.Now()
+	for i := range ordered {
+		if ordered[i].QueuedAt.IsZero() {
+			ordered[i].QueuedAt = queuedAt
+		}
+	}
+	if c.options.Workers > 1 {
+		input := make(chan Segment, len(ordered))
+		for _, segment := range ordered {
+			input <- segment
+		}
+		close(input)
+		return c.TranscribeStream(ctx, input, progress)
 	}
 	if c.options.AllowMixedProviders {
 		return c.transcribeMixed(ctx, ordered, progress, newTextBudget(c.options.MaxTextBytes))
@@ -446,6 +465,9 @@ consume:
 				cancel(newTranscriptLimitError(SegmentLimitExceeded, provider.Name()))
 				break consume
 			}
+			if segment.QueuedAt.IsZero() {
+				segment.QueuedAt = time.Now()
+			}
 			segments = append(segments, segment)
 			select {
 			case jobs <- segment:
@@ -467,7 +489,9 @@ consume:
 
 func transcribeBatchWith(ctx context.Context, provider Provider, segments []Segment, workers int, progress Progress, budget *textBudget) (map[int]SegmentResult, error) {
 	input := make(chan Segment, len(segments))
+	queuedAt := time.Now()
 	for _, segment := range segments {
+		segment.QueuedAt = queuedAt
 		input <- segment
 	}
 	close(input)
@@ -479,6 +503,17 @@ func transcribeOne(ctx context.Context, provider Provider, segment Segment, prog
 	if err := ctx.Err(); err != nil {
 		return streamOutcome{err: err}
 	}
+	started := time.Now()
+	queueMS := int64(0)
+	if !segment.QueuedAt.IsZero() {
+		queueMS = max(int64(0), started.Sub(segment.QueuedAt).Milliseconds())
+	}
+	defer func() {
+		events.ReportTiming(ctx, events.Timing{
+			Stage: "stt", DurationMS: time.Since(started).Milliseconds(), QueueMS: queueMS,
+			AudioMS: segment.Request.Audio.Duration().Milliseconds(),
+		}, provider.Name(), segment.Index+1)
+	}()
 	if progress.Started != nil {
 		progress.Started(segment.Index, provider.Name())
 	}
@@ -495,7 +530,7 @@ func transcribeOne(ctx context.Context, provider Provider, segment Segment, prog
 	if progress.Done != nil {
 		progress.Done(segment.Index, result.Provider)
 	}
-	return streamOutcome{result: SegmentResult{Index: segment.Index, Text: result.Text, Provider: result.Provider}}
+	return streamOutcome{result: SegmentResult{Index: segment.Index, Text: result.Text, Provider: result.Provider, Overlap: segment.Overlap}}
 }
 
 func orderedResults(results map[int]SegmentResult) []SegmentResult {
@@ -530,6 +565,7 @@ func (c *Chain) transcribeMixed(ctx context.Context, segments []Segment, progres
 				firstPrimaryErr = primaryErr
 			}
 			failedProvider = c.fallback
+			segment.QueuedAt = time.Now()
 			outcome = transcribeOne(ctx, c.fallback, segment, progress, budget)
 			err = outcome.err
 			if isTranscriptLimitError(err) {
@@ -583,7 +619,9 @@ func (c *Chain) transcribeMixed(ctx context.Context, segments []Segment, progres
 func transcribeWith(ctx context.Context, provider Provider, segments []Segment, continueOnError bool, progress Progress, budget *textBudget) ([]SegmentResult, error) {
 	results := make([]SegmentResult, 0, len(segments))
 	var firstErr error
+	queuedAt := time.Now()
 	for _, segment := range segments {
+		segment.QueuedAt = queuedAt
 		outcome := transcribeOne(ctx, provider, segment, progress, budget)
 		err := outcome.err
 		if err != nil {
@@ -644,10 +682,15 @@ func sortSegmentResults(results []SegmentResult) {
 }
 
 func assemble(results []SegmentResult, total int, warnings []Warning) MultiResult {
+	results = append([]SegmentResult(nil), results...)
 	parts := make([]string, 0, len(results))
 	providers := make(map[string]struct{})
-	for _, result := range results {
-		if text := strings.TrimSpace(result.Text); text != "" {
+	for i := range results {
+		result := &results[i]
+		if i > 0 && result.Overlap && results[i-1].Index+1 == result.Index {
+			result.OverlapWords = matchingOverlap(results[i-1].Text, result.Text)
+		}
+		if text := TrimOverlap(result.Text, result.OverlapWords); text != "" {
 			parts = append(parts, text)
 		}
 		providers[result.Provider] = struct{}{}

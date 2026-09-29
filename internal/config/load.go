@@ -83,6 +83,7 @@ func ResolveWithOptions(options ResolveOptions) (Config, error) {
 		sort.Strings(keys)
 		return Config{}, configError("clés TOML inconnues: " + strings.Join(keys, ", "))
 	} else if file != nil {
+		explicit["stt.live_chunking"] = metadata.IsDefined("stt", "live_chunking")
 		for _, key := range profileDefaultKeys {
 			parts := strings.Split(key, ".")
 			explicit[key] = metadata.IsDefined(parts...)
@@ -98,6 +99,10 @@ func ResolveWithOptions(options ResolveOptions) (Config, error) {
 	}
 	applyOverrides(&cfg, options.Overrides, explicit)
 	applyProfileDefaults(&cfg, explicit)
+	// Preserve the historical explicit opt-out without requiring another key.
+	if cfg.STT.ChunkSeconds == 0 && !explicit["stt.live_chunking"] {
+		cfg.STT.LiveChunking = false
+	}
 	if err := Validate(cfg); err != nil {
 		return Config{}, err
 	}
@@ -198,6 +203,8 @@ func applyEnvironment(cfg *Config, lookup func(string) (string, bool), explicit 
 		target *int
 		key    string
 	}{
+		"MURMUR_STT_CHUNK_PAUSE_MS":     {&cfg.STT.ChunkPauseMS, "stt.chunk_pause_ms"},
+		"MURMUR_STT_CHUNK_OVERLAP_MS":   {&cfg.STT.ChunkOverlapMS, "stt.chunk_overlap_ms"},
 		"MURMUR_OSD_SUCCESS_TIMEOUT_MS": {&cfg.UI.OSD.SuccessTimeoutMS, "ui.osd.success_timeout_ms"},
 		"MURMUR_OSD_ERROR_TIMEOUT_MS":   {&cfg.UI.OSD.ErrorTimeoutMS, "ui.osd.error_timeout_ms"},
 		"MURMUR_LOG_MAX_BYTES":          {&cfg.Logging.MaxBytes, "logging.max_bytes"},
@@ -277,6 +284,7 @@ func applyOverrides(cfg *Config, o Overrides, explicit map[string]bool) {
 	setBool(o.UISound, &cfg.UI.Sound)
 	setString(o.LoggingLevel, &cfg.Logging.Level)
 	for key, defined := range map[string]bool{
+		"stt.live_chunking":         o.STTLiveChunking != nil,
 		"general.profile":           o.Profile != nil,
 		"audio.keep_recordings":     o.KeepRecordings != nil,
 		"policy.stt_zones":          o.STTZones != nil,

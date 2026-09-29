@@ -12,8 +12,10 @@ provider = "speaches"
 fallback = "openai"
 # Bornes: chunk_seconds <= 86400, max_text_bytes <= 67108864,
 # max_segments <= 65536.
-chunk_seconds = 0
-live_chunking = false
+chunk_seconds = 5
+live_chunking = true
+chunk_pause_ms = 500
+chunk_overlap_ms = 0
 chunk_workers = 2
 max_text_bytes = 16777216
 max_segments = 4096

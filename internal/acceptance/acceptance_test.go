@@ -295,7 +295,9 @@ func TestAcceptance_MUR001_UploadUsesValidatedBytesWithAndWithoutChunking(t *tes
 			}
 			t.Cleanup(func() { _ = audio.RemoveSegments(segments) })
 
-			chain, err := core.BuildTranscriber(context.Background(), baseConfig(server.URL), core.BuildOptions{})
+			cfg := baseConfig(server.URL)
+			cfg.STT.ChunkWorkers = 1 // Compare uploads in chronological order.
+			chain, err := core.BuildTranscriber(context.Background(), cfg, core.BuildOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -456,6 +458,73 @@ func TestAcceptance_07_LiveSnapshotsReconcatenateWithoutSampleLoss(t *testing.T)
 	}
 	if !hasEvent(stream, events.PartialStarted, "local") || !hasEvent(stream, events.PartialDone, "local") {
 		t.Fatal("événements partial_started/partial_done manquants")
+	}
+}
+
+func TestShortLiveDefaultsStartBeforeStopAndCleanOnce(t *testing.T) {
+	first := make(chan struct{})
+	var once sync.Once
+	var sttCalls, cleanupCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/audio/transcriptions") {
+			_ = multipartAudio(t, r)
+			sttCalls.Add(1)
+			once.Do(func() { close(first) })
+			writeJSON(t, w, map[string]string{"text": "bonjour"})
+			return
+		}
+		cleanupCalls.Add(1)
+		writeJSON(t, w, map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "texte final"}}}})
+	}))
+	defer server.Close()
+	cfg := baseConfig(server.URL)
+	defaults := config.Defaults()
+	cfg.STT.ChunkSeconds, cfg.STT.ChunkPauseMS, cfg.STT.LiveChunking = defaults.STT.ChunkSeconds, defaults.STT.ChunkPauseMS, defaults.STT.LiveChunking
+	cfg.Cleanup.Enabled, cfg.Cleanup.Provider = true, "cleanup"
+	cfg.Cleanup.Providers["cleanup"] = cleanupProviderConfig(server.URL, "local", "cleanup")
+	bus := events.NewBus()
+	stream, unsubscribe := bus.Subscribe(128)
+	defer unsubscribe()
+	var output bytes.Buffer
+	o := buildOrchestrator(t, cfg, buildFixture(t, 6200*time.Millisecond), &sysexec.FakeExecutor{}, &output, bus, false)
+	done := runSession(o)
+	waitForState(t, o, session.Recording)
+	select {
+	case <-first:
+	case <-time.After(time.Second):
+		t.Fatal("6.2 seconds of PCM did not start live STT")
+	}
+	if cleanupCalls.Load() != 0 {
+		t.Fatal("cleanup ran before stop")
+	}
+	if response := o.Handle(context.Background(), ipc.NewRequest(ipc.Stop)); !response.OK {
+		t.Fatalf("stop: %#v", response)
+	}
+	result, err := awaitSession(t, done)
+	if err != nil || result.Result != session.Completed || cleanupCalls.Load() != 1 || sttCalls.Load() != 2 || output.String() != "texte final\n" {
+		t.Fatalf("result=%#v err=%v cleanup=%d stt=%d output=%q", result, err, cleanupCalls.Load(), sttCalls.Load(), output.String())
+	}
+	bus.Close()
+	stages := make(map[string]int)
+	delivered := 0
+	for event := range stream {
+		if err := event.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if event.Timing != nil {
+			stages[event.Timing.Stage]++
+		}
+		if event.Type == events.Delivered {
+			delivered++
+		}
+	}
+	for _, stage := range []string{"capture_ready", "cleanup", "processing", "delivery", "after_stop", "stt_complete"} {
+		if stages[stage] != 1 {
+			t.Fatalf("timings=%v", stages)
+		}
+	}
+	if stages["stt"] != 2 || delivered != 1 {
+		t.Fatalf("timings=%v delivered=%d", stages, delivered)
 	}
 }
 
@@ -1029,6 +1098,7 @@ func TestAcceptance_17_SegmentFailureRestartsFallbackWithoutFalseProvider(t *tes
 
 	cfg := baseConfig(server.URL + "/primary")
 	cfg.STT.ChunkSeconds = 1
+	cfg.STT.ChunkWorkers = 1 // This scenario checks sequential fail-fast fallback.
 	cfg.STT.Fallback = "fallback"
 	cfg.STT.Providers["fallback"] = providerConfig(server.URL+"/fallback", "local", "fallback", "fr")
 	bus := events.NewBus()
@@ -1363,6 +1433,11 @@ wait
 
 func baseConfig(baseURL string) config.Config {
 	cfg := config.Defaults()
+	// Historical batch scenarios choose their mode explicitly. Live/default
+	// behavior is exercised separately below and by the live acceptance cases.
+	cfg.STT.ChunkSeconds = 0
+	cfg.STT.ChunkPauseMS = 0
+	cfg.STT.LiveChunking = false
 	cfg.General.CommandPack = "fr"
 	cfg.STT.Providers["local"] = providerConfig(baseURL, "local", "stt", "fr")
 	cfg.Sink.Mode = "stdout"

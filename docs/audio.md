@@ -152,13 +152,43 @@ transmise directement au STT; chaque segment est une copie immuable d'une plage
 `[début, fin)` alignée
 sur `BlockAlign`; le curseur suivant reprend exactement à `fin`.
 
-Le segment complet le plus récent reste en attente. Dès qu'un autre segment
-complet existe, le précédent peut alimenter le STT pendant que le même
-`pw-record` continue d'écrire. Au stop, `SIGINT` finalise l'unique recorder.
+Le segment cible est émis dès qu'une seconde supplémentaire de PCM est disponible.
+Cette réserve ne devient pas un snapshot en attente : elle reste dans le WAV de
+capture. Avec le défaut 5 s, le premier envoi est donc possible à 6 s, au lieu
+d'attendre deux fenêtres complètes. Un poll ne matérialise qu'un segment; un
+retard du serveur ne déclenche pas une copie de tout le retard accumulé.
+Au stop, `SIGINT` finalise l'unique recorder.
 `FinalizeGrowing` inspecte et écrit le header sur le même fd
 `O_RDWR|O_NOFOLLOW`, puis crée le snapshot final scellé depuis cet inode sans
-rouvrir le chemin. Le reliquat est extrait depuis le dernier curseur. Une queue
-de moins d'une seconde est concaténée au segment retenu avant émission.
+rouvrir le chemin. Le reliquat est extrait depuis le dernier curseur, un segment
+à la fois sous contre-pression. Si la dernière coupe laisserait moins d'une
+seconde, elle n'a pas lieu : le dernier segment est allongé. Aucun échantillon
+n'est perdu et aucun segment déjà envoyé n'est rejoué pour traiter cette queue.
+
+### Pause et recouvrement
+
+`chunk_pause_ms=500` cherche la dernière pause de 200 ms dans les 500 ms précédant
+la coupe cible : fenêtres PCM de 10 ms, RMS inférieur ou égal à 327 sur 32768
+(environ -40 dBFS). La coupe passe au milieu des 200 ms détectées. Sans pause,
+elle reste fixe. Ce détecteur d'énergie ne reconnaît ni la parole ni les fins de
+phrase et ne supprime aucun silence. Il n'attend jamais au-delà de la cible pour
+trouver une pause. `chunk_pause_ms=0` restaure la coupe fixe.
+
+`chunk_overlap_ms`, désactivé par défaut, ajoute jusqu'à 1 s de PCM précédent au
+début de chaque segment suivant. Ainsi, 5 s + 500 ms de recouvrement donne des
+uploads jusqu'à 5,5 s hors petite queue finale, avec un pas nominal de 5 s.
+Le STT compare uniquement les suffixes/préfixes des segments acoustiquement
+recouvrants et d'index consécutifs. Il exige 2 à 8 mots identiques après
+normalisation de casse Unicode et de ponctuation périphérique. Un mot isolé ou
+un segment entier n'est jamais retiré. Une omission partielle coupe cette
+continuité. Le texte original de chaque segment est conservé, ainsi que le
+nombre `overlap_words` retiré de l'assemblage.
+
+Cette méthode ne résout pas l'ambiguïté entre une répétition légitime à cheval
+sur deux segments et un doublon dû à l'overlap. Elle reste donc expérimentale et
+opt-in. Les tests couvrent noms propres accentués, nombres, négations, commandes,
+code-switching, répétitions et trous de récupération partielle. Le protocole et
+les limites des mesures réelles figurent dans [latency.md](latency.md).
 
 Le contrôle de capture ne partage pas la goroutine qui pousse les segments. Les
 files entre le segmenter, l'orchestrateur et le pool STT restent bornées et
@@ -188,8 +218,10 @@ La file de snapshots, de capacité 2, ne borne pas le nombre cumulé de fichiers
 nécessaires au tri ou à une reprise complète sur fallback. Le STT refuse donc au
 plus tard `stt.max_segments` segments, annule ses requêtes en vol et fait aborter
 la capture live par l'orchestrateur. En batch, le nombre exact de segments est
-calculé en O(1) depuis le WAV validé et refusé avant d'allouer le plan de tailles
-ou de créer le premier fichier temporaire. Avec le défaut 4096, les fenêtres
+calculé en O(1) depuis le WAV validé pour la coupe fixe, puis affiné par un plan
+borné si la recherche de pause est active. Un dépassement est refusé avant de
+créer le premier fichier temporaire. Le producteur live vérifie lui aussi cette
+limite avant chaque snapshot. Avec le défaut 4096, les fenêtres
 fixes bornent déjà la durée segmentée, à un éventuel reliquat final fusionné
 près; aucun second plafond de durée n'est ajouté. Le chemin sans découpage reste
 un segment unique, quelle que soit la durée de son WAV, et sa sortie est bornée

@@ -86,8 +86,8 @@ seconde requête.
 
 Types possibles: `session_started`, `capture_ready`, `state_changed`,
 `partial_started`, `partial_done`, `partial_failed`, `provider_selected`,
-`degraded`, `delivered`, `terminal`. Les champs optionnels sont `state`,
-`result`, `provider`, `error_class`, `component`, `partial` et `total`. La
+`degraded`, `delivered`, `terminal`, `timing`. Les champs optionnels sont `state`,
+`result`, `provider`, `error_class`, `component`, `partial`, `total` et `timing`. La
 structure exclut volontairement tout champ de texte libre ou transcript.
 Pour une transcription multi-provider, les événements globaux utilisent
 `provider="mixed"`; les événements partiels gardent le provider du segment.
@@ -97,6 +97,14 @@ provider réellement lancée publie `partial_started`, puis `partial_done` ou
 une nouvelle tentative; les segments non tentés après arrêt anticipé, annulation
 ou dépassement de budget ne publient aucun `partial_started`. `total` est connu
 après capture et reste omis pendant la capture live.
+
+`timing` contient `stage`, `duration_ms` et, pour `stage="stt"`, les champs
+optionnels `queue_ms` et `audio_ms`. Les étapes autorisées sont `capture_ready`,
+`stt`, `stt_complete`, `cleanup`, `processing`, `delivery` et `after_stop`.
+Les mesures STT portent le provider et l'index de la tentative. Les durées sont
+entières, non négatives, et mesurées avec l'horloge monotone du processus pour les
+opérations. Aucun texte libre n'est ajouté. Voir [latency.md](latency.md) pour
+les bornes exactes de chaque mesure. Les timings n'alimentent pas l'UI.
 
 Le bus et chaque abonnement sont bornés et non bloquants. Un client lent peut
 perdre des événements; il doit reconstruire l'état via `status` plutôt que

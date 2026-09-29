@@ -40,11 +40,12 @@ type commandWarning struct {
 }
 
 type commandSegment struct {
-	Index      int    `json:"index"`
-	Provider   string `json:"provider"`
-	Model      string `json:"model"`
-	Language   string `json:"language"`
-	Transcript string `json:"transcript"`
+	Index        int    `json:"index"`
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	Language     string `json:"language"`
+	Transcript   string `json:"transcript"`
+	OverlapWords int    `json:"overlap_words,omitempty"`
 }
 
 const maxCleanupInputBytes = 4 << 20
@@ -104,7 +105,6 @@ func (r commandResult) validate() error {
 		if segment.Index <= previousIndex {
 			return fmt.Errorf("index de segment non strictement croissant: %d après %d", segment.Index, previousIndex)
 		}
-		previousIndex = segment.Index
 		if segment.Provider == "" || segment.Provider == stt.ProviderMixed {
 			return fmt.Errorf("provider de segment invalide à l'index %d", segment.Index)
 		}
@@ -112,7 +112,15 @@ func (r commandResult) validate() error {
 		if text == "" {
 			return fmt.Errorf("transcript de segment vide à l'index %d", segment.Index)
 		}
+		if segment.OverlapWords < 0 || segment.OverlapWords == 1 || segment.OverlapWords > 8 || (segment.OverlapWords > 0 && (segment.Index != previousIndex+1 || len(parts) == 0)) {
+			return errors.New("déduplication de segment invalide")
+		}
+		text = stt.TrimOverlap(text, segment.OverlapWords)
+		if text == "" {
+			return errors.New("segment entièrement dédupliqué")
+		}
 		parts = append(parts, text)
+		previousIndex = segment.Index
 		current := metadata{model: segment.Model, language: segment.Language}
 		if previous, ok := providers[segment.Provider]; ok && previous != current {
 			return fmt.Errorf("métadonnées incohérentes pour le provider %q", segment.Provider)
@@ -153,6 +161,7 @@ func (app App) transcribeCommand(ctx context.Context, args []string, stdout, std
 		return usageError(stderr, "usage invalide pour transcribe")
 	}
 	emitter := newCommandEmitter(*eventOutput, stderr, "transcribe")
+	ctx = emitter.withTimings(ctx)
 	emitter.emit(events.SessionStarted, "transcribing", "", "", "", 0, 0, "")
 	result := newCommandResult("transcribe")
 
@@ -172,6 +181,7 @@ func (app App) cleanupCommand(ctx context.Context, args []string, stdout, stderr
 		return usageError(stderr, "usage invalide pour cleanup")
 	}
 	emitter := newCommandEmitter(*eventOutput, stderr, "cleanup")
+	ctx = emitter.withTimings(ctx)
 	emitter.emit(events.SessionStarted, "processing", "", "", "", 0, 0, "")
 	result := newCommandResult("cleanup")
 	var input []byte
@@ -250,6 +260,7 @@ func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr
 		return usageError(stderr, "usage invalide pour dictate")
 	}
 	emitter := newCommandEmitter(options.eventOutput, stderr, "dictate")
+	ctx = emitter.withTimings(ctx)
 	result := newCommandResult("dictate")
 	emitter.emit(events.SessionStarted, "starting", "", "", "", 0, 0, "")
 	none := "none"
@@ -282,6 +293,7 @@ func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr
 	recorder := pwrecord.New(sysexec.OSExecutor{
 		Env: config.CredentialHelperEnvironment(cfg, os.Environ()),
 	})
+	readyTiming := events.Measure(ctx, "capture_ready")
 	recording, err := recorder.Start(captureCtx, audio.RecordOptions{
 		Directory: runtimeDir, Target: cfg.Audio.Source,
 		Retention: audio.RetentionOptions{Keep: cfg.Audio.KeepRecordings || cfg.Policy.RetainDiagnostics},
@@ -300,6 +312,7 @@ func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr
 	case <-ctx.Done():
 	}
 	if captureReady {
+		readyTiming()
 		emitter.emit(events.CaptureReady, "recording", "", "", "", 0, 0, "")
 	}
 
@@ -318,6 +331,8 @@ func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr
 			recording.Abort(),
 		), options.jsonOutput, stdout, stderr, emitter, false)
 	}
+	afterStop := events.Measure(ctx, "after_stop")
+	emitter.emit(events.StateChanged, "stopping", "", "", "", 0, 0, "")
 	stopCtx, cancelStop := context.WithTimeout(context.Background(), 10*time.Second)
 	file, err := recording.Stop(stopCtx)
 	cancelStop()
@@ -330,11 +345,16 @@ func (app App) dictateCommand(ctx context.Context, args []string, stdout, stderr
 		var delivery sink.Sink
 		delivery, err = sink.New(cfg, sink.Options{Stdout: stdout})
 		if err == nil {
+			deliveryTiming := events.Measure(ctx, "delivery")
 			err = deliverDictate(delivery, result.TranscriptFinal)
+			deliveryTiming()
 		}
 		if err == nil {
 			emitter.emit(events.Delivered, "delivering", result.Provider, "", "", 0, 0, "")
 		}
+	}
+	if err == nil {
+		afterStop()
 	}
 	_, releaseErr := file.Release()
 	if releaseErr != nil {
@@ -477,7 +497,12 @@ func executeTranscription(ctx context.Context, cfg config.Config, path string, e
 func executeTranscriptionWith(ctx context.Context, cfg config.Config, path string, transcriber *stt.Chain, processor *textpipe.Pipeline, emitter *commandEmitter, command string) (commandResult, error) {
 	result := newCommandResult(command)
 	setConfiguredSTTMetadata(&result, cfg)
-	multi, err := core.TranscribeFile(ctx, path, time.Duration(cfg.STT.ChunkSeconds)*time.Second, transcriber, stt.Progress{
+	sttTiming := events.Measure(ctx, "stt_complete")
+	multi, err := core.TranscribeFileWithOptions(ctx, path, audio.ChunkOptions{
+		Duration: time.Duration(cfg.STT.ChunkSeconds) * time.Second, MinTail: time.Second,
+		PauseWindow: time.Duration(cfg.STT.ChunkPauseMS) * time.Millisecond,
+		Overlap:     time.Duration(cfg.STT.ChunkOverlapMS) * time.Millisecond,
+	}, transcriber, stt.Progress{
 		Started: func(index int, provider string) {
 			emitter.emit(events.PartialStarted, "transcribing", provider, "", "stt", index+1, 0, "")
 		},
@@ -488,6 +513,7 @@ func executeTranscriptionWith(ctx context.Context, cfg config.Config, path strin
 			emitter.emit(events.PartialFailed, "transcribing", provider, class, "stt", index+1, 0, "")
 		},
 	})
+	sttTiming()
 	if err != nil {
 		if provider := stt.ProviderFromError(err); provider != "" {
 			setProviderMetadata(&result, cfg, provider)
@@ -506,6 +532,7 @@ func executeTranscriptionWith(ctx context.Context, cfg config.Config, path strin
 		result.Segments = append(result.Segments, commandSegment{
 			Index: segment.Index, Provider: segment.Provider, Model: provider.Model,
 			Language: provider.Language, Transcript: segment.Text,
+			OverlapWords: segment.OverlapWords,
 		})
 	}
 	for _, warning := range multi.Warnings {
@@ -654,6 +681,32 @@ func newCommandEmitter(enabled bool, writer io.Writer, command string) *commandE
 }
 
 func (e *commandEmitter) emit(kind events.Type, state, provider string, class errs.Class, component string, partial, total int, result string) {
+	e.writeEvent(events.Event{
+		Version: 1, Type: kind, Timestamp: time.Now().UTC(), SessionID: e.sessionID,
+		State: state, Result: result, Provider: provider, ErrorClass: class,
+		Component: component, Partial: partial, Total: total,
+	})
+}
+
+func (e *commandEmitter) withTimings(ctx context.Context) context.Context {
+	return events.WithTimings(ctx, func(timing events.Timing, provider string, partial int) {
+		state := "processing"
+		switch timing.Stage {
+		case "stt", "stt_complete":
+			state = "transcribing"
+		case "capture_ready":
+			state = "recording"
+		case "delivery", "after_stop":
+			state = "delivering"
+		}
+		e.writeEvent(events.Event{
+			Version: 1, Type: events.TimingRecorded, Timestamp: time.Now().UTC(), SessionID: e.sessionID,
+			State: state, Provider: provider, Partial: partial, Timing: &timing,
+		})
+	})
+}
+
+func (e *commandEmitter) writeEvent(event events.Event) {
 	if !e.enabled {
 		return
 	}
@@ -662,11 +715,7 @@ func (e *commandEmitter) emit(kind events.Type, state, provider string, class er
 	if e.err != nil {
 		return
 	}
-	e.err = events.EncodeJSONL(shortWriteCheckingWriter{e.writer}, events.Event{
-		Version: 1, Type: kind, Timestamp: time.Now().UTC(), SessionID: e.sessionID,
-		State: state, Result: result, Provider: provider, ErrorClass: class,
-		Component: component, Partial: partial, Total: total,
-	})
+	e.err = events.EncodeJSONL(shortWriteCheckingWriter{e.writer}, event)
 }
 
 func (e *commandEmitter) failure() error {

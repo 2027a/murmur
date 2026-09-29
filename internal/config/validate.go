@@ -40,6 +40,12 @@ func Validate(cfg Config) error {
 	if cfg.STT.LiveChunking && cfg.STT.ChunkSeconds == 0 {
 		return configError("stt.live_chunking exige stt.chunk_seconds strictement positif")
 	}
+	if cfg.STT.ChunkPauseMS < 0 || cfg.STT.ChunkPauseMS > 1000 || (cfg.STT.ChunkSeconds > 0 && cfg.STT.ChunkPauseMS >= cfg.STT.ChunkSeconds*1000) {
+		return configError("stt.chunk_pause_ms doit être compris entre 0 et 1000 et inférieur à la durée du segment")
+	}
+	if cfg.STT.ChunkOverlapMS < 0 || cfg.STT.ChunkOverlapMS > 1000 || (cfg.STT.ChunkSeconds > 0 && cfg.STT.ChunkOverlapMS >= cfg.STT.ChunkSeconds*1000-cfg.STT.ChunkPauseMS) {
+		return configError("stt.chunk_overlap_ms doit être compris entre 0 et 1000 et inférieur au pas minimal du segment")
+	}
 	if cfg.STT.ChunkWorkers < 1 || cfg.STT.ChunkWorkers > MaximumChunkWorkers {
 		return configError("stt.chunk_workers doit être compris entre 1 et 64")
 	}

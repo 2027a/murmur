@@ -183,14 +183,18 @@ func (r *liveRecording) finalize(result liveCaptureResult) error {
 	if err := r.initSegmenter(); err != nil {
 		return errors.Join(err, result.file.File.Close())
 	}
-	segments, err := r.segmenter.Finalize(result.file.File)
-	if err != nil {
-		return errors.Join(err, result.file.File.Close())
-	}
 	r.mu.Lock()
 	r.final = result.file
 	r.mu.Unlock()
-	return r.emit(segments)
+	for {
+		segment, err := r.segmenter.NextFinal(result.file.File)
+		if err != nil || segment == nil {
+			return err
+		}
+		if err := r.emit([]audio.LiveSegment{*segment}); err != nil {
+			return err
+		}
+	}
 }
 
 func (r *liveRecording) emit(segments []audio.LiveSegment) error {

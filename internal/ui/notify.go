@@ -190,6 +190,9 @@ func (u *Notify) run() {
 }
 
 func notificationForEvent(event events.Event) (Notification, bool) {
+	if backgroundProgress(event) {
+		return Notification{}, false
+	}
 	n := Notification{Urgency: 1, TimeoutMS: 2200}
 	switch event.Type {
 	case events.SessionStarted:

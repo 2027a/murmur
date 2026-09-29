@@ -22,6 +22,7 @@ DOC_FILES := \
 	doctor.md \
 	implementation-status.md \
 	ipc.md \
+	latency.md \
 	markdown.md \
 	osd-protocol.md \
 	production-migration.md \
@@ -29,7 +30,7 @@ DOC_FILES := \
 	session.md \
 	sinks.md \
 	text-pipeline.md
-EXAMPLE_FILES := config.minimal.toml config.full.toml
+EXAMPLE_FILES := config.minimal.toml config.full.toml latency-corpus.fr.txt
 
 .PHONY: build test test-go test-osd lint module-check vuln-check clean install uninstall installcheck check-install-vars
 

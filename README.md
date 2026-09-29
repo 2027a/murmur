@@ -387,13 +387,39 @@ Le protocole et les options du helper sont dans
 
 ## Chunking live
 
-`stt.chunk_seconds > 0` découpe la capture après son arrêt. Ajouter
-`stt.live_chunking=true` démarre la transcription de segments complets pendant
-qu'un unique `pw-record` continue d'écrire. `stt.chunk_workers` borne la
+Les sessions utilisent désormais des segments de **5 secondes**, transcrits
+pendant la capture. Une recherche de pause sur les dernières **500 ms** rapproche
+les coupes des silences. Le premier envoi peut partir après environ **6 secondes**
+de PCM : seule une seconde de réserve reste en attente pour éviter une petite
+queue finale. L'indicateur micro reste en « écoute » pendant le travail STT.
+
+```toml
+[stt]
+chunk_seconds = 5
+live_chunking = true
+chunk_pause_ms = 500
+chunk_overlap_ms = 0
+chunk_workers = 2
+```
+
+Les valeurs explicites d'une configuration existante restent prioritaires :
+remplacer notamment un ancien `chunk_seconds = 60` pour adopter les fenêtres
+courtes. `live_chunking=false` sélectionne le batch, et `chunk_seconds=0`
+désactive le découpage et le live implicite. `transcribe` et `dictate` utilisent
+le découpage post-capture, avec les mêmes règles de pause et de concurrence.
+
+`stt.chunk_workers` borne la
 concurrence et les résultats sont réordonnés avant une unique passe globale de
 cleanup/plugin et une unique livraison. Les files de segments sont bornées, mais
 leur contre-pression ne retarde pas l'arrêt: le stop interrompt `pw-record` sur un
 plan de contrôle distinct, puis la finalisation attend le drainage des workers.
+
+`chunk_pause_ms=0` permet une comparaison à coupe fixe. Le recouvrement
+`chunk_overlap_ms=500` est expérimental et opt-in : la déduplication de mots aux
+frontières reste heuristique. Les mesures JSONL `timing` séparent STT, attente en
+file, cleanup et délai après stop, sans texte dicté. Le protocole de comparaison,
+les outils de replay et les résultats mesurés sont dans
+[`docs/latency.md`](docs/latency.md).
 
 `stt.max_text_bytes=16777216` borne par défaut à 16 Mio le cumul UTF-8 de toutes
 les réponses réussies et de leurs séparateurs, principal et fallback compris.

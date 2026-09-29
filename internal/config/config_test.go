@@ -41,6 +41,38 @@ func TestResolveRejectsUnknownTOMLKey(t *testing.T) {
 	}
 }
 
+func TestShortLiveDefaultsAndExplicitBatchOptOut(t *testing.T) {
+	for _, test := range []struct {
+		name, body string
+		live       bool
+		seconds    int
+		invalid    bool
+	}{
+		{"defaults", "", true, 5, false},
+		{"old explicit opt-out", "[stt]\nchunk_seconds=0\n", false, 0, false},
+		{"explicit batch", "[stt]\nlive_chunking=false\n", false, 5, false},
+		{"explicit duration", "[stt]\nchunk_seconds=60\n", true, 60, false},
+		{"conflicting explicit keys", "[stt]\nchunk_seconds=0\nlive_chunking=true\n", false, 0, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, err := ResolveWithOptions(ResolveOptions{Path: writeConfig(t, test.body), LookupEnv: func(string) (string, bool) { return "", false }})
+			if test.invalid {
+				if errs.Classify(err) != errs.ConfigInvalid {
+					t.Fatalf("err=%v", err)
+				}
+				return
+			}
+			if err != nil || cfg.STT.LiveChunking != test.live || cfg.STT.ChunkSeconds != test.seconds || cfg.STT.ChunkPauseMS != 500 || cfg.STT.ChunkOverlapMS != 0 {
+				t.Fatalf("stt=%#v err=%v", cfg.STT, err)
+			}
+		})
+	}
+	_, err := ResolveWithOptions(ResolveOptions{Path: writeConfig(t, "[stt]\nchunk_seconds=0\n"), LookupEnv: func(name string) (string, bool) { return "true", name == "MURMUR_STT_LIVE_CHUNKING" }})
+	if errs.Classify(err) != errs.ConfigInvalid {
+		t.Fatalf("explicit env live must fail: %v", err)
+	}
+}
+
 func TestResolveConsumesOperationalLoggingConfig(t *testing.T) {
 	path := writeConfig(t, "[logging]\nlevel = \"debug\"\nmax_bytes = 2048\nmax_files = 2\n")
 	cfg, err := Resolve(path, Overrides{})
@@ -461,7 +493,10 @@ func TestValidationRules(t *testing.T) {
 		want string
 	}{
 		{"negative chunk", func(c *Config) { c.STT.ChunkSeconds = -1 }, "chunk_seconds"},
-		{"live without chunk", func(c *Config) { c.STT.LiveChunking = true }, "live_chunking"},
+		{"live without chunk", func(c *Config) { c.STT.LiveChunking = true; c.STT.ChunkSeconds = 0 }, "live_chunking"},
+		{"negative pause", func(c *Config) { c.STT.ChunkPauseMS = -1 }, "chunk_pause_ms"},
+		{"oversized pause", func(c *Config) { c.STT.ChunkPauseMS = 1001 }, "chunk_pause_ms"},
+		{"pause fills segment", func(c *Config) { c.STT.ChunkSeconds = 1; c.STT.ChunkPauseMS = 1000 }, "chunk_pause_ms"},
 		{"zero workers", func(c *Config) { c.STT.ChunkWorkers = 0 }, "chunk_workers"},
 		{"zero text budget", func(c *Config) { c.STT.MaxTextBytes = 0 }, "max_text_bytes"},
 		{"excessive text budget", func(c *Config) { c.STT.MaxTextBytes = 64<<20 + 1 }, "max_text_bytes"},
@@ -649,7 +684,7 @@ func TestNumericValidationBoundaries(t *testing.T) {
 		field    string
 		setValue func(*Config, int)
 	}{
-		{"chunk seconds", 0, MaximumDurationSeconds, "chunk_seconds", func(c *Config, value int) { c.STT.ChunkSeconds = value }},
+		{"chunk seconds", 0, MaximumDurationSeconds, "chunk_seconds", func(c *Config, value int) { c.STT.ChunkSeconds = value; c.STT.LiveChunking = false }},
 		{"chunk workers", 1, MaximumChunkWorkers, "chunk_workers", func(c *Config, value int) { c.STT.ChunkWorkers = value }},
 		{"text bytes", 1, MaximumTextBytes, "max_text_bytes", func(c *Config, value int) { c.STT.MaxTextBytes = value }},
 		{"segments", 1, MaximumSegments, "max_segments", func(c *Config, value int) { c.STT.MaxSegments = value }},

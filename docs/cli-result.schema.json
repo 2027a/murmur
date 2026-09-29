@@ -40,7 +40,8 @@
           "provider": { "type": "string", "minLength": 1 },
           "model": { "type": "string" },
           "language": { "type": "string" },
-          "transcript": { "type": "string", "minLength": 1 }
+          "transcript": { "type": "string", "minLength": 1 },
+          "overlap_words": { "type": "integer", "minimum": 2, "maximum": 8 }
         }
       }
     },

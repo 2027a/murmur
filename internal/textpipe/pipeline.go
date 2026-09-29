@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/events"
 	"git.2027a.net/2027a/murmur/internal/plugin"
 )
 
@@ -91,6 +92,7 @@ func New(options Options) (*Pipeline, error) {
 // Run processes one already assembled transcript. Consequently cleanup is
 // global and invoked at most once, regardless of the transcript's segment count.
 func (p *Pipeline) Run(ctx context.Context, transcript string) (Result, error) {
+	defer events.Measure(ctx, "processing")()
 	if p == nil || p.pack == nil {
 		return Result{}, errors.New("text pipeline is not initialized")
 	}

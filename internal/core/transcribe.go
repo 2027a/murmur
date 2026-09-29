@@ -16,6 +16,11 @@ import (
 // TranscribeFile validates and transcribes a canonical WAV without taking
 // ownership of the source file.
 func TranscribeFile(ctx context.Context, path string, chunkDuration time.Duration, transcriber *stt.Chain, progress stt.Progress) (result stt.MultiResult, err error) {
+	return TranscribeFileWithOptions(ctx, path, audio.ChunkOptions{Duration: chunkDuration, MinTail: time.Second}, transcriber, progress)
+}
+
+func TranscribeFileWithOptions(ctx context.Context, path string, options audio.ChunkOptions, transcriber *stt.Chain, progress stt.Progress) (result stt.MultiResult, err error) {
+	chunkDuration := options.Duration
 	file, err := wav.Open(path)
 	if err != nil {
 		return stt.MultiResult{}, err
@@ -25,7 +30,7 @@ func TranscribeFile(ctx context.Context, path string, chunkDuration time.Duratio
 		return stt.MultiResult{}, errs.New(errs.Internal, "stt", "transcriber absent")
 	}
 	if chunkDuration > 0 {
-		count, countErr := file.SegmentCount(chunkDuration, time.Second)
+		count, countErr := file.SegmentCount(chunkDuration, options.MinTail)
 		if countErr != nil {
 			return stt.MultiResult{}, countErr
 		}
@@ -42,21 +47,20 @@ func TranscribeFile(ctx context.Context, path string, chunkDuration time.Duratio
 		}
 		defer os.RemoveAll(outputDir)
 	}
-	segments, err := audio.Chunk(file, audio.ChunkOptions{
-		Duration: chunkDuration, MinTail: time.Second, OutputDir: outputDir,
-	})
+	options.OutputDir = outputDir
+	options.ValidateCount = transcriber.ValidateSegmentCount
+	segments, err := audio.Chunk(file, options)
 	if err != nil {
 		return stt.MultiResult{}, err
 	}
 
-	requests := make(chan stt.Segment, len(segments))
-	for _, segment := range segments {
-		requests <- stt.Segment{Index: segment.Index, Request: stt.Request{
+	requests := make([]stt.Segment, len(segments))
+	for i, segment := range segments {
+		requests[i] = stt.Segment{Index: segment.Index, Overlap: segment.Overlap, Request: stt.Request{
 			Audio: segment.File, Filename: filepath.Base(segment.File.Path()),
 		}}
 	}
-	close(requests)
-	result, err = transcriber.TranscribeStream(ctx, requests, progress)
+	result, err = transcriber.TranscribeSegments(ctx, requests, progress)
 	cleanupErr := audio.RemoveSegments(segments)
 	if err != nil {
 		return stt.MultiResult{}, errors.Join(err, cleanupErr)

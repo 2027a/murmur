@@ -415,35 +415,48 @@ func TestMixedPartialAllSegmentsFailedPreservesEffectiveFallbackError(t *testing
 }
 
 func TestStreamWorkerPoolIsBoundedAndResultsAreOrdered(t *testing.T) {
-	var active, maximum atomic.Int32
-	provider := providerFunc{name: "primary", transcribe: func(_ context.Context, request Request) (Result, error) {
-		current := active.Add(1)
-		defer active.Add(-1)
-		for {
-			seen := maximum.Load()
-			if current <= seen || maximum.CompareAndSwap(seen, current) {
-				break
+	for _, mode := range []string{"stream", "batch"} {
+		t.Run(mode, func(t *testing.T) {
+			var active, maximum atomic.Int32
+			provider := providerFunc{name: "primary", transcribe: func(_ context.Context, request Request) (Result, error) {
+				current := active.Add(1)
+				defer active.Add(-1)
+				for {
+					seen := maximum.Load()
+					if current <= seen || maximum.CompareAndSwap(seen, current) {
+						break
+					}
+				}
+				index, _ := strconv.Atoi(request.Model)
+				time.Sleep(time.Duration(4-index) * 10 * time.Millisecond)
+				return Result{Text: request.Model}, nil
+			}}
+			chain, err := NewChain(provider, nil, MultiOptions{Workers: 2})
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-		index, _ := strconv.Atoi(request.Model)
-		time.Sleep(time.Duration(4-index) * 10 * time.Millisecond)
-		return Result{Text: request.Model}, nil
-	}}
-	chain, err := NewChain(provider, nil, MultiOptions{Workers: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	input := make(chan Segment, 4)
-	for index := range 4 {
-		input <- Segment{Index: index, Request: Request{Model: strconv.Itoa(index)}}
-	}
-	close(input)
-	result, err := chain.TranscribeStream(context.Background(), input, Progress{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Text != "0 1 2 3" || maximum.Load() != 2 {
-		t.Fatalf("result=%#v maximum=%d", result, maximum.Load())
+			input := make(chan Segment, 4)
+			for index := range 4 {
+				input <- Segment{Index: index, Request: Request{Model: strconv.Itoa(index)}}
+			}
+			close(input)
+			var result MultiResult
+			if mode == "stream" {
+				result, err = chain.TranscribeStream(context.Background(), input, Progress{})
+			} else {
+				var batch []Segment
+				for segment := range input {
+					batch = append(batch, segment)
+				}
+				result, err = chain.TranscribeSegments(context.Background(), batch, Progress{})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Text != "0 1 2 3" || maximum.Load() != 2 {
+				t.Fatalf("result=%#v maximum=%d", result, maximum.Load())
+			}
+		})
 	}
 }
 

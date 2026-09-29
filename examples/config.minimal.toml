@@ -3,7 +3,12 @@ profile = "local"
 
 [stt]
 provider = "local"
-# Le chemin historique reste actif: live_chunking=false et chunk_seconds=0.
+# Transcription anticipée pendant la capture, livraison unique au stop.
+chunk_seconds = 5
+live_chunking = true
+chunk_pause_ms = 500
+# Recouvrement expérimental, désactivé pour préserver les répétitions.
+chunk_overlap_ms = 0
 # Limites implicites: max_text_bytes=16777216 et max_segments=4096;
 # maxima: chunk_seconds=86400, max_text_bytes=67108864, max_segments=65536.
 

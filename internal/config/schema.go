@@ -27,6 +27,8 @@ type STTConfig struct {
 	Provider            string                    `toml:"provider"`
 	Fallback            string                    `toml:"fallback"`
 	ChunkSeconds        int                       `toml:"chunk_seconds"`
+	ChunkPauseMS        int                       `toml:"chunk_pause_ms"`
+	ChunkOverlapMS      int                       `toml:"chunk_overlap_ms"`
 	LiveChunking        bool                      `toml:"live_chunking"`
 	ChunkWorkers        int                       `toml:"chunk_workers"`
 	MaxTextBytes        int                       `toml:"max_text_bytes"`
@@ -141,6 +143,9 @@ func Defaults() Config {
 		Audio:   AudioConfig{},
 		STT: STTConfig{
 			Provider:     "local",
+			ChunkSeconds: 5,
+			ChunkPauseMS: 500,
+			LiveChunking: true,
 			ChunkWorkers: 2,
 			MaxTextBytes: 16 << 20,
 			MaxSegments:  4096,

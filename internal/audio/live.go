@@ -16,11 +16,19 @@ import (
 type LiveOptions struct {
 	SegmentDuration time.Duration
 	MinimumTail     time.Duration
+	PauseWindow     time.Duration
+	Overlap         time.Duration
+	MaxSegments     int
 }
 
+// ErrSegmentLimit is fatal even when partial STT recovery is enabled.
+var ErrSegmentLimit = errs.New(errs.ServerError, "audio", "nombre de segments audio supérieur à la limite configurée")
+
 type LiveSegment struct {
-	Index int
-	File  wav.File
+	Index     int
+	File      wav.File
+	CreatedAt time.Time
+	Overlap   bool
 }
 
 type LiveRecorder interface {
@@ -46,11 +54,20 @@ func ValidateLiveOptions(options LiveOptions) error {
 	if options.MinimumTail < 0 {
 		return errs.New(errs.ConfigInvalid, "audio", "la durée minimale de fin live ne peut pas être négative")
 	}
+	if options.PauseWindow < 0 || options.PauseWindow >= options.SegmentDuration {
+		return errs.New(errs.ConfigInvalid, "audio", "la fenêtre de pause doit être positive ou nulle et inférieure au segment")
+	}
+	if options.MaxSegments < 0 {
+		return errs.New(errs.ConfigInvalid, "audio", "limite de segments négative")
+	}
+	if options.Overlap < 0 || options.Overlap >= options.SegmentDuration-options.PauseWindow {
+		return errs.New(errs.ConfigInvalid, "audio", "le recouvrement doit être positif ou nul et inférieur au pas minimal")
+	}
 	return nil
 }
 
-// GrowingSegmenter snapshots a WAV written by another process. It keeps the
-// latest full segment so a short final tail can be merged without retranscribing.
+// GrowingSegmenter only waits for MinimumTail of lookahead, not another full
+// segment. The unsubmitted PCM remains in the capture until the next cut/stop.
 type GrowingSegmenter struct {
 	path           string
 	source         *os.File
@@ -58,7 +75,9 @@ type GrowingSegmenter struct {
 	segmentSamples int64
 	minimumTail    int64
 	cursor         int64
-	pending        *wav.File
+	pauseWindow    time.Duration
+	overlap        int64
+	maxSegments    int
 	files          []wav.File
 	nextIndex      int
 }
@@ -85,6 +104,8 @@ func newGrowingSegmenter(source *os.File, path, outputDir string, options LiveOp
 	return &GrowingSegmenter{
 		path: path, source: source, outputDir: outputDir, segmentSamples: segmentSamples,
 		minimumTail: liveDurationSamples(options.MinimumTail),
+		pauseWindow: options.PauseWindow, maxSegments: options.MaxSegments,
+		overlap: liveDurationSamples(options.Overlap),
 	}, nil
 }
 
@@ -94,20 +115,20 @@ func (s *GrowingSegmenter) Poll() ([]LiveSegment, error) {
 		return nil, err
 	}
 	defer snapshot.Close()
-	var emitted []LiveSegment
-	for snapshot.Samples()-s.cursor >= s.segmentSamples {
-		part, err := snapshot.Slice(s.outputDir, s.cursor, s.segmentSamples)
-		if err != nil {
-			return nil, err
-		}
-		s.files = append(s.files, part)
-		s.cursor += s.segmentSamples
-		if s.pending != nil {
-			emitted = append(emitted, s.segment(*s.pending))
-		}
-		s.pending = &part
+	if snapshot.Samples()-s.cursor < s.segmentSamples+s.minimumTail {
+		return nil, nil
 	}
-	return emitted, nil
+	// Materialize at most one segment per poll: a slow server must not cause a
+	// burst of snapshots proportional to the accumulated recording duration.
+	end, err := snapshot.PauseCut(s.cursor+s.segmentSamples, s.pauseWindow)
+	if err != nil {
+		return nil, err
+	}
+	part, err := s.cut(snapshot, end)
+	if err != nil {
+		return nil, err
+	}
+	return []LiveSegment{part}, nil
 }
 
 func (s *GrowingSegmenter) Finalize(final wav.File) ([]LiveSegment, error) {
@@ -115,43 +136,51 @@ func (s *GrowingSegmenter) Finalize(final wav.File) ([]LiveSegment, error) {
 		return nil, errs.New(errs.AudioFailed, "audio", "le WAV final ne correspond pas aux snapshots live")
 	}
 	var emitted []LiveSegment
-	for final.Samples()-s.cursor >= s.segmentSamples {
-		part, err := final.Slice(s.outputDir, s.cursor, s.segmentSamples)
+	for s.cursor < final.Samples() {
+		part, err := s.NextFinal(final)
 		if err != nil {
 			return nil, err
 		}
-		s.files = append(s.files, part)
-		s.cursor += s.segmentSamples
-		if s.pending != nil {
-			emitted = append(emitted, s.segment(*s.pending))
-		}
-		s.pending = &part
-	}
-	var tail *wav.File
-	if remaining := final.Samples() - s.cursor; remaining > 0 {
-		part, err := final.Slice(s.outputDir, s.cursor, remaining)
-		if err != nil {
-			return nil, err
-		}
-		s.files = append(s.files, part)
-		tail = &part
-	}
-	if s.pending != nil && tail != nil && tail.Samples() < s.minimumTail {
-		merged, err := wav.Concat(s.outputDir, *s.pending, *tail)
-		if err != nil {
-			return nil, err
-		}
-		s.files = append(s.files, merged)
-		emitted = append(emitted, s.segment(merged))
-		return emitted, nil
-	}
-	if s.pending != nil {
-		emitted = append(emitted, s.segment(*s.pending))
-	}
-	if tail != nil {
-		emitted = append(emitted, s.segment(*tail))
+		emitted = append(emitted, *part)
 	}
 	return emitted, nil
+}
+
+// NextFinal drains one immutable segment at a time under consumer backpressure.
+func (s *GrowingSegmenter) NextFinal(final wav.File) (*LiveSegment, error) {
+	if final.Path() != s.path || final.Samples() < s.cursor {
+		return nil, errs.New(errs.AudioFailed, "audio", "le WAV final ne correspond pas aux snapshots live")
+	}
+	if final.Samples() == s.cursor {
+		return nil, nil
+	}
+	end := final.Samples()
+	if end-s.cursor > s.segmentSamples && end-s.cursor >= s.segmentSamples+s.minimumTail {
+		var err error
+		end, err = final.PauseCut(s.cursor+s.segmentSamples, s.pauseWindow)
+		if err != nil {
+			return nil, err
+		}
+	}
+	part, err := s.cut(final, end)
+	return &part, err
+}
+
+func (s *GrowingSegmenter) cut(source wav.File, end int64) (LiveSegment, error) {
+	if s.maxSegments > 0 && s.nextIndex >= s.maxSegments {
+		return LiveSegment{}, ErrSegmentLimit
+	}
+	start := max(int64(0), s.cursor-s.overlap)
+	overlap := start < s.cursor
+	file, err := source.Slice(s.outputDir, start, end-start)
+	if err != nil {
+		return LiveSegment{}, err
+	}
+	s.files = append(s.files, file)
+	s.cursor = end
+	part := s.segment(file)
+	part.Overlap = overlap
+	return part, nil
 }
 
 func (s *GrowingSegmenter) Close() error {
@@ -175,7 +204,7 @@ func (s *GrowingSegmenter) snapshot() (wav.File, bool, error) {
 }
 
 func (s *GrowingSegmenter) segment(file wav.File) LiveSegment {
-	segment := LiveSegment{Index: s.nextIndex, File: file}
+	segment := LiveSegment{Index: s.nextIndex, File: file, CreatedAt: time.Now()}
 	s.nextIndex++
 	return segment
 }
@@ -381,14 +410,15 @@ func (r *fakeLiveRecording) finalize(result fakeStopRequest) error {
 		return result.err
 	}
 	defer result.file.Close()
-	if err := r.poll(); err != nil {
-		return err
+	for {
+		segment, err := r.segmenter.NextFinal(result.file)
+		if err != nil || segment == nil {
+			return err
+		}
+		if err := r.emit([]LiveSegment{*segment}); err != nil {
+			return err
+		}
 	}
-	segments, err := r.segmenter.Finalize(result.file)
-	if err != nil {
-		return err
-	}
-	return r.emit(segments)
 }
 
 func (r *fakeLiveRecording) emit(segments []LiveSegment) error {

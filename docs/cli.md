@@ -183,6 +183,13 @@ celles des segments. Les égalités de compte, l'ordre des index et ces relation
 de provenance complètent le schéma, qui ne peut pas comparer ces champs entre
 eux.
 
+Avec `chunk_overlap_ms>0`, un segment peut aussi porter `overlap_words` (2 à 8).
+Son `transcript` reste la réponse originale. Pour reconstruire `transcript_raw`,
+retirer ce nombre de mots initiaux délimités par des espaces Unicode, conserver
+le reste, puis joindre les segments par une espace. Sans ce champ, aucun mot
+n'est retiré. Le champ n'est jamais présent sur le premier segment ni après un
+trou d'index. Cette extension optionnelle du JSON v1 est décrite dans le schéma.
+
 Chaque avertissement expose `class`, `provider`, `component` et `message`.
 Les dégradations cleanup/plugin conservent leur classe (`server_error`,
 `timeout`, `auth_failed`, `policy_blocked`, `unavailable`, etc.) dans ce JSON et
@@ -198,6 +205,11 @@ d'usage ne produit pas d'objet et retourne 2.
 JSON v1 par ligne. Ils couvrent démarrage, capture éventuelle, segments STT,
 provider choisi, dégradations, livraison éventuelle et terminaison. Comme le bus
 d'événements de session, ils ne contiennent jamais de transcript.
+
+Les événements `timing` ajoutent les durées STT, file d'attente, cleanup et
+processing. `dictate` ajoute readiness, livraison et délai après stop. Les
+horodatages `partial_started` identifient la première tentative, et les
+`partial_done`/`partial_failed` son achèvement. Voir [latency.md](latency.md).
 
 Lorsque `--events` est actif, aucun message d'erreur humain n'est ajouté sur
 stderr: l'erreur terminale est un événement JSONL et, avec `--json`, son détail

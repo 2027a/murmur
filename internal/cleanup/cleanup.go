@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"git.2027a.net/2027a/murmur/internal/errs"
+	"git.2027a.net/2027a/murmur/internal/events"
 	"git.2027a.net/2027a/murmur/internal/policy"
 )
 
@@ -95,6 +96,7 @@ func (c *Client) Clean(ctx context.Context, input string) Result {
 	if strings.TrimSpace(input) == "" {
 		return Result{Text: input}
 	}
+	defer events.Measure(ctx, "cleanup")()
 	output, err := c.request(ctx, input)
 	if err == nil {
 		err = validateOutput(input, output)

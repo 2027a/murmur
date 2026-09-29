@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "command": "transcribe",
+  "success": true,
+  "provider": "local",
+  "model": "test",
+  "language": "fr",
+  "transcript_raw": "Je ne veux pas supprimer le dossier",
+  "transcript_final": "Je ne veux pas supprimer le dossier",
+  "segment_count": 2,
+  "segments": [
+    {"index": 0, "provider": "local", "model": "test", "language": "fr", "transcript": "Je ne veux pas"},
+    {"index": 1, "provider": "local", "model": "test", "language": "fr", "transcript": "veux pas supprimer le dossier", "overlap_words": 2}
+  ],
+  "warnings": [],
+  "error": null
+}
