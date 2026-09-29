@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -77,6 +78,49 @@ func TestBuildCleanupPropagatesAllowInsecure(t *testing.T) {
 	cfg.Policy.CleanupZones = []string{"internet"}
 	if _, err := BuildCleanup(context.Background(), cfg, BuildOptions{}); err != nil {
 		t.Fatalf("BuildCleanup() error = %v", err)
+	}
+}
+
+func TestCleanupReasoningEffortHTTPContract(t *testing.T) {
+	for _, effort := range []string{"", "none", "low", "high"} {
+		t.Run("effort="+effort, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var payload map[string]json.RawMessage
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Error(err)
+					http.Error(w, "invalid JSON", http.StatusBadRequest)
+					return
+				}
+				value, present := payload["reasoning_effort"]
+				if effort == "" {
+					if present {
+						t.Error("unset effort must be omitted, not sent empty")
+					}
+				} else {
+					var got string
+					if err := json.Unmarshal(value, &got); err != nil || got != effort {
+						t.Errorf("effort=%q, want %q: %v", got, effort, err)
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"Bonjour.","reasoning":"not output text"}}]}`))
+			}))
+			defer server.Close()
+			cfg := config.Defaults()
+			cfg.Cleanup.Enabled, cfg.Cleanup.Provider = true, "test"
+			cfg.Cleanup.Providers["test"] = config.CleanupProviderConfig{
+				Type: "openai-compatible", BaseURL: server.URL, Model: "test", TimeoutS: 1, Zone: "local",
+				ReasoningEffort: effort,
+			}
+			client, err := BuildCleanup(context.Background(), cfg, BuildOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := client.Clean(context.Background(), "bonjour")
+			if result.Degraded != nil || result.Text != "Bonjour." {
+				t.Fatalf("result=%#v", result)
+			}
+		})
 	}
 }
 

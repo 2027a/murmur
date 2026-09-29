@@ -240,6 +240,9 @@ func validateCleanupProvider(path string, provider CleanupProviderConfig) error 
 	if strings.TrimSpace(provider.Model) == "" {
 		return configError(path + ".model ne peut pas être vide")
 	}
+	if !oneOf(provider.ReasoningEffort, "", "none", "minimal", "low", "medium", "high", "xhigh", "max") {
+		return configError(path + ".reasoning_effort doit être vide ou valoir none, minimal, low, medium, high, xhigh ou max")
+	}
 	return validateHTTPProvider(path, provider.Type, provider.BaseURL, provider.TimeoutS, provider.Zone, provider.AllowInsecure, provider.credentials())
 }
 

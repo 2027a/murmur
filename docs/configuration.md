@@ -113,11 +113,28 @@ Chaque entrée de `stt.providers.<nom>` accepte:
 | `api_key_command` | tableau argv d'un helper explicite, sans shell; premier élément non vide |
 
 Une entrée `cleanup.providers.<nom>` accepte uniquement `type`, `base_url`,
-`model`, `timeout_s`, `zone`, `allow_insecure` et les trois sources
+`model`, `reasoning_effort`, `timeout_s`, `zone`, `allow_insecure` et les trois sources
 `api_key_*`. Les champs STT `language`, `prompt`, `health_*`, `retries` et
 `retry_backoff_ms` y sont des clés inconnues. Le prompt cleanup appartient à
 `cleanup.prompt`, pas au provider. Son `model` doit être non vide et son
 `timeout_s` reste borné de 1 à 86400 s.
+
+`reasoning_effort` règle le niveau de raisonnement du modèle de cleanup :
+
+```toml
+[cleanup.providers.openrouter]
+# ... base_url, model et credentials habituels ...
+reasoning_effort = "low"
+```
+
+Clé absente ou vide : aucun paramètre envoyé, comportement du provider conservé.
+Valeurs : `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
+La valeur est transmise telle quelle dans `reasoning_effort` de la requête Chat
+Completions (OpenAI/OpenRouter). Les niveaux acceptés dépendent du modèle :
+`none` demande la désactivation, `low` un effort réduit. Murmur ne remplace pas
+un niveau refusé par un autre; un refus suit le repli cleanup habituel, avec
+conservation du texte et warning. Le [catalogue OpenRouter](https://openrouter.ai/api/v1/models)
+expose les niveaux pris en charge dans `reasoning.supported_efforts`.
 
 Une seule source `api_key_*` peut être définie. `config.SecretResolver` reçoit
 un `CommandRunner`; la session et `doctor` l'adaptent à `internal/sysexec` afin

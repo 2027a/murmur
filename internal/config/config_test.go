@@ -41,6 +41,31 @@ func TestResolveRejectsUnknownTOMLKey(t *testing.T) {
 	}
 }
 
+func TestCleanupReasoningEffortTOML(t *testing.T) {
+	for _, effort := range []string{"", "none", "minimal", "low", "medium", "high", "xhigh", "max", "automatic", "LOW"} {
+		t.Run("effort="+effort, func(t *testing.T) {
+			path := writeConfig(t, `[cleanup.providers.test]
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8001/v1"
+model = "test"
+timeout_s = 10
+zone = "local"
+reasoning_effort = "`+effort+`"
+`)
+			cfg, err := ResolveWithOptions(ResolveOptions{Path: path, LookupEnv: func(string) (string, bool) { return "", false }})
+			if effort == "automatic" || effort == "LOW" {
+				if errs.Classify(err) != errs.ConfigInvalid || !strings.Contains(err.Error(), "cleanup.providers.test.reasoning_effort") {
+					t.Fatalf("invalid effort accepted: %v", err)
+				}
+				return
+			}
+			if err != nil || cfg.Cleanup.Providers["test"].ReasoningEffort != effort {
+				t.Fatalf("effort not loaded: %v", err)
+			}
+		})
+	}
+}
+
 func TestShortLiveDefaultsAndExplicitBatchOptOut(t *testing.T) {
 	for _, test := range []struct {
 		name, body string

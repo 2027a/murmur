@@ -79,7 +79,8 @@ func BuildCleanup(ctx context.Context, cfg config.Config, options BuildOptions) 
 	}
 	return cleanup.NewOpenAICompatible(cleanup.Config{
 		BaseURL: provider.BaseURL, Model: provider.Model, Prompt: cfg.Cleanup.Prompt,
-		APIKey: secret, Timeout: time.Duration(provider.TimeoutS) * time.Second,
+		ReasoningEffort: provider.ReasoningEffort,
+		APIKey:          secret, Timeout: time.Duration(provider.TimeoutS) * time.Second,
 		AllowedZone: zone, AllowInsecure: provider.AllowInsecure, TrustedNetworks: trusted,
 	})
 }

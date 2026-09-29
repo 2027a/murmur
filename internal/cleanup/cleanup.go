@@ -28,6 +28,7 @@ var sentinelPattern = regexp.MustCompile(`(__[A-Z][A-Z0-9_]*__|\[\[MURMUR_CMD:[^
 type Config struct {
 	BaseURL         string
 	Model           string
+	ReasoningEffort string
 	Prompt          string
 	APIKey          string
 	Timeout         time.Duration
@@ -43,12 +44,13 @@ type Result struct {
 }
 
 type Client struct {
-	endpoint string
-	model    string
-	prompt   string
-	apiKey   string
-	timeout  time.Duration
-	client   *http.Client
+	endpoint        string
+	model           string
+	reasoningEffort string
+	prompt          string
+	apiKey          string
+	timeout         time.Duration
+	client          *http.Client
 }
 
 func NewOpenAICompatible(config Config) (*Client, error) {
@@ -76,11 +78,12 @@ func NewOpenAICompatible(config Config) (*Client, error) {
 		return nil, errs.Wrap(errs.ConfigInvalid, "cleanup", "construction de l'endpoint impossible", err)
 	}
 	return &Client{
-		endpoint: endpoint,
-		model:    config.Model,
-		prompt:   prompt,
-		apiKey:   strings.TrimSpace(config.APIKey),
-		timeout:  config.Timeout,
+		endpoint:        endpoint,
+		model:           config.Model,
+		reasoningEffort: config.ReasoningEffort,
+		prompt:          prompt,
+		apiKey:          strings.TrimSpace(config.APIKey),
+		timeout:         config.Timeout,
 		client: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -109,10 +112,12 @@ func (c *Client) Clean(ctx context.Context, input string) Result {
 
 func (c *Client) request(ctx context.Context, input string) (string, error) {
 	payload, err := json.Marshal(struct {
-		Model    string    `json:"model"`
-		Messages []message `json:"messages"`
+		Model           string    `json:"model"`
+		Messages        []message `json:"messages"`
+		ReasoningEffort string    `json:"reasoning_effort,omitempty"`
 	}{
-		Model: c.model,
+		Model:           c.model,
+		ReasoningEffort: c.reasoningEffort,
 		Messages: []message{
 			{Role: "system", Content: c.prompt},
 			{Role: "user", Content: input},

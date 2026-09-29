@@ -70,15 +70,16 @@ type CleanupConfig struct {
 }
 
 type CleanupProviderConfig struct {
-	Type          string   `toml:"type"`
-	BaseURL       string   `toml:"base_url"`
-	Model         string   `toml:"model"`
-	TimeoutS      int      `toml:"timeout_s"`
-	Zone          string   `toml:"zone"`
-	AllowInsecure bool     `toml:"allow_insecure"`
-	APIKeyEnv     string   `toml:"api_key_env"`
-	APIKeyFile    string   `toml:"api_key_file"`
-	APIKeyCommand []string `toml:"api_key_command"`
+	Type            string   `toml:"type"`
+	BaseURL         string   `toml:"base_url"`
+	Model           string   `toml:"model"`
+	ReasoningEffort string   `toml:"reasoning_effort"`
+	TimeoutS        int      `toml:"timeout_s"`
+	Zone            string   `toml:"zone"`
+	AllowInsecure   bool     `toml:"allow_insecure"`
+	APIKeyEnv       string   `toml:"api_key_env"`
+	APIKeyFile      string   `toml:"api_key_file"`
+	APIKeyCommand   []string `toml:"api_key_command"`
 }
 
 func (p ProviderConfig) credentials() CredentialConfig {
