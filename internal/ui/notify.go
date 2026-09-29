@@ -190,7 +190,7 @@ func notificationForEvent(event events.Event) (Notification, bool) {
 	if backgroundProgress(event) {
 		return Notification{}, false
 	}
-	n := Notification{Summary: "Murmur", Urgency: 1, TimeoutMS: 2200}
+	n := Notification{Summary: "🟢 Murmur", Urgency: 1, TimeoutMS: 2200}
 	switch event.Type {
 	case events.SessionStarted:
 		n.Body = "Démarrage de la capture"
@@ -223,6 +223,7 @@ func notificationForEvent(event events.Event) (Notification, bool) {
 		n.Body = progressLabel("Segment terminé", event.Partial, event.Total)
 		n.Category = "murmur.processing"
 	case events.PartialFailed, events.Degraded:
+		n.Summary = "🔴 Murmur"
 		n.Body = "Fonctionnement dégradé"
 		n.Category = "murmur.warning"
 		n.Urgency = 2
@@ -236,6 +237,7 @@ func notificationForEvent(event events.Event) (Notification, bool) {
 			n.Category = "murmur.success"
 			n.TimeoutMS = 3500
 		case "cancelled":
+			n.Summary = "🟠 Murmur"
 			n.Body = "Dictée annulée"
 			n.Category = "murmur.cancelled"
 			n.TimeoutMS = 3500
@@ -244,6 +246,7 @@ func notificationForEvent(event events.Event) (Notification, bool) {
 			n.Category = "murmur.warning"
 			n.TimeoutMS = 4500
 		default:
+			n.Summary = "🔴 Murmur"
 			n.Body = "Échec de la dictée"
 			n.Category = "murmur.error"
 			n.Urgency = 2

@@ -255,19 +255,20 @@ func TestNotificationVisualCategories(t *testing.T) {
 		event    events.Event
 		category string
 		body     string
+		summary  string
 	}{
-		{name: "starting", event: event(events.SessionStarted, "starting"), category: "murmur.starting", body: "Démarrage de la capture"},
-		{name: "recording", event: event(events.CaptureReady, "recording"), category: "murmur.recording", body: "Écoute en cours"},
-		{name: "processing", event: event(events.StateChanged, "transcribing"), category: "murmur.processing", body: "Transcription en cours"},
-		{name: "degraded", event: event(events.Degraded, "error"), category: "murmur.warning", body: "Fonctionnement dégradé"},
-		{name: "success", event: events.Event{Type: events.Terminal, Result: "completed"}, category: "murmur.success", body: "Dictée terminée"},
-		{name: "cancelled", event: events.Event{Type: events.Terminal, Result: "cancelled"}, category: "murmur.cancelled", body: "Dictée annulée"},
-		{name: "error", event: events.Event{Type: events.Terminal, Result: "failed"}, category: "murmur.error", body: "Échec de la dictée"},
+		{name: "starting", event: event(events.SessionStarted, "starting"), category: "murmur.starting", body: "Démarrage de la capture", summary: "🟢 Murmur"},
+		{name: "recording", event: event(events.CaptureReady, "recording"), category: "murmur.recording", body: "Écoute en cours", summary: "🟢 Murmur"},
+		{name: "processing", event: event(events.StateChanged, "transcribing"), category: "murmur.processing", body: "Transcription en cours", summary: "🟢 Murmur"},
+		{name: "degraded", event: event(events.Degraded, "error"), category: "murmur.warning", body: "Fonctionnement dégradé", summary: "🔴 Murmur"},
+		{name: "success", event: events.Event{Type: events.Terminal, Result: "completed"}, category: "murmur.success", body: "Dictée terminée", summary: "🟢 Murmur"},
+		{name: "cancelled", event: events.Event{Type: events.Terminal, Result: "cancelled"}, category: "murmur.cancelled", body: "Dictée annulée", summary: "🟠 Murmur"},
+		{name: "error", event: events.Event{Type: events.Terminal, Result: "failed"}, category: "murmur.error", body: "Échec de la dictée", summary: "🔴 Murmur"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			notification, ok := notificationForEvent(test.event)
-			if !ok || notification.Category != test.category || notification.Summary != "Murmur" || notification.Body != test.body {
+			if !ok || notification.Category != test.category || notification.Summary != test.summary || notification.Body != test.body {
 				t.Fatalf("notification = %#v", notification)
 			}
 		})

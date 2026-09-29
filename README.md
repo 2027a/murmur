@@ -364,7 +364,8 @@ nouvelle session peut démarrer.
 
 `ui.mode="notify"` utilise les notifications freedesktop, remplace la
 notification précédente et se dégrade en no-op si D-Bus est absent. Le titre
-est « Murmur », avec un texte court : « Écoute en cours », « Transcription en
+est « Murmur », précédé d'un rond vert, orange en cas d'annulation et rouge en
+cas d'erreur, avec un texte court : « Écoute en cours », « Transcription en
 cours », « Dictée terminée » ou « Dictée annulée ».
 `ui.mode="osd"` lance `murmur-osd` et lui transmet des états JSONL sans texte
 dicté; sa panne n'interrompt ni transcription ni livraison. L'installation OSD
