@@ -90,10 +90,11 @@ Dans les dotfiles : `MurmurService.qml` partage le pont, `MurmurIndicator.qml`
 dessine le module et `MurmurLogic.js` définit les libellés/couleurs. Les douze
 barres représentent un historique d'amplitude, pas des fréquences.
 
-Le module fait 24 px de large au repos, 146 px pendant une session, et 18 px
-de haut. Il est placé près du volume dans le cartouche droit existant : fond
+Le module fait 24 px de large au repos et 18 px de haut. Pendant une session,
+sa largeur suit le texte affiché ou le vumètre avec sa durée. Il est placé à
+gauche du quota Codex, après les éléments du tiroir, dans le cartouche droit : fond
 bleu `#81a1c1`, icône sombre `#3b4252`, coins externes de 4 px gérés par le parent.
-Fonds Nord cyan en écoute, violet en correction, vert en succès, jaune en
+Fonds Nord bleu habituel en écoute, violet en correction, vert en succès, jaune en
 annulation/dégradation, rouge en erreur. Le mouvement de traitement est un
 balayage, pas une estimation de progression.
 
