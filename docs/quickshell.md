@@ -94,7 +94,7 @@ Le module fait 24 px de large au repos et 18 px de haut. Pendant une session,
 sa largeur suit le texte affiché ou le vumètre avec sa durée. Il est placé à
 gauche du quota Codex, après les éléments du tiroir, dans le cartouche droit : fond
 bleu `#81a1c1`, icône sombre `#3b4252`, coins externes de 4 px gérés par le parent.
-Fonds Nord bleu habituel en écoute, violet en correction, vert en succès, jaune en
+Fonds Nord mauve `#b48ead` en écoute et en correction, vert en succès, jaune en
 annulation/dégradation, rouge en erreur. Le mouvement de traitement est un
 balayage, pas une estimation de progression.
 
@@ -114,6 +114,8 @@ Mathieu a validé l'interface en usage réel après les derniers ajustements :
 bleu habituel pendant l'écoute, position à gauche du quota Codex et largeur
 adaptée au contenu. Il a demandé la clôture du ticket 51 sur ce périmètre.
 La configuration locale déployée utilise `ui.mode="auto"` et `ui.sound=true`.
+Après cette validation, Mathieu a choisi le mauve Nord `#b48ead` pour le fond
+d'enregistrement; le repos conserve le bleu habituel.
 
 ```sh
 make lint test build
