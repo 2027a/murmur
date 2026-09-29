@@ -211,8 +211,12 @@ demande le stop et vérifie que `SIGINT` précède leur libération, puis contr�
 index et le PCM après drainage. Les tests vérifient aussi qu'un seul appel
 `pw-record` a lieu.
 Un unique `Release` idempotent supprime segments et capture, ou conserve le WAV
-final si la rétention a été explicitement activée. `Abort` tue l'unique processus
-et supprime toujours l'ensemble.
+final si la rétention a été explicitement activée. L'orchestrateur finalise le
+nettoyage sur toutes les sorties du parcours live, y compris un dépassement STT
+pendant le drainage après stop. Si `Stop` possède déjà la capture, `Abort`
+observe sa fin sans prendre la décision de rétention; l'orchestrateur appelle
+ensuite `Release`, ou `Discard` pour une session annulée. Un `Abort` propriétaire
+arrête l'unique processus et supprime l'ensemble immédiatement.
 
 La file de snapshots, de capacité 2, ne borne pas le nombre cumulé de fichiers
 nécessaires au tri ou à une reprise complète sur fallback. Le STT refuse donc au
