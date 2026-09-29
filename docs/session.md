@@ -204,6 +204,13 @@ Sans terminal, les deux UI abandonnent immédiatement le travail intermédiaire;
 l'OSD n'accorde que 250 ms à la sortie sur EOF. Aucun worker UI ni helper OSD ne
 survit au retour de `Run`.
 
+Le worker de barre QuickShell termine aussi avec la session : il finit
+l'échange en cours et tente une dernière émission bornée de l'instantané
+terminal (600 ms par échange), puis ferme l'éventuel repli notifications.
+Le processus `murmur ui`, lui, appartient au shell : il reste disponible entre
+les sessions. Le module QML assure la durée d'affichage du résultat sans
+retenir le verrou de session. Voir [`quickshell.md`](quickshell.md).
+
 L'événement `provider_selected`, les événements globaux suivants et l'événement
 terminal reprennent le provider effectif, ou `mixed` pour une transcription
 multi-provider. Les événements de segment conservent leur provider propre.

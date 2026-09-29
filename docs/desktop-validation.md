@@ -153,6 +153,21 @@ pas depuis `go run` ni depuis un chemin du checkout.
 
 ## UI
 
+### Barre QuickShell, ticket 51
+
+Validation de l'interface déployée confirmée par Mathieu après les ajustements
+de couleur, d'ordre et de largeur. Bilan détaillé dans [`quickshell.md`](quickshell.md).
+
+- [x] États et couleurs Nord prévisualisés sur deux écrans, largeur adaptée au contenu.
+- [x] RMS/crêtes reçus depuis une capture PipeWire réelle, sans second recorder.
+- [x] Barre masquée révélée sans changement de focus ni réservation supplémentaire.
+- [x] Pont UI suspendu puis repris : capture intacte, état périmé retiré, reprise du vumètre.
+- [x] Rechargement de QuickShell pendant la capture : instantané récupéré.
+- [x] Configuration locale `auto`, `doctor` positif avec acquittement du module QML.
+- [ ] Débranchement physique du micro/écran et affichage en plein écran.
+
+### Notifications, OSD et son
+
 - [ ] `notify` affiche les états démarrage, écoute, transcription, traitement,
   livraison et résultat terminal sans transcript.
 - [ ] Les notifications successives remplacent la précédente et une panne D-Bus

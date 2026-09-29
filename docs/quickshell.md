@@ -110,6 +110,11 @@ focalisé prend le relais si celui du démarrage est débranché.
 
 ## Vérification
 
+Mathieu a validé l'interface en usage réel après les derniers ajustements :
+bleu habituel pendant l'écoute, position à gauche du quota Codex et largeur
+adaptée au contenu. Il a demandé la clôture du ticket 51 sur ce périmètre.
+La configuration locale déployée utilise `ui.mode="auto"` et `ui.sound=true`.
+
 ```sh
 make lint test build
 MURMUR_UI_MODE=auto murmur doctor --json

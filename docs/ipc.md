@@ -136,3 +136,9 @@ Le même `events.Bus` alimente IPC et UI. Les deux représentations partagent do
 les états et la provenance, tandis que leur cadrage reste distinct: événement
 complet pour IPC, payload réduit pour l'OSD. Voir
 [`osd-protocol.md`](osd-protocol.md).
+
+Le frontend QuickShell reçoit des instantanés dérivés des mêmes événements via
+un pont distinct, `murmur ui` et `ui.sock`, décrit dans
+[`quickshell.md`](quickshell.md). Ses mesures acoustiques à 20 Hz ne passent pas
+dans le bus ni le journal de session. Le pont appartient au shell et reste
+disponible entre les dictées; `session.sock` garde son cycle de vie par session.

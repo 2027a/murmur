@@ -14,7 +14,7 @@ dans [`desktop-validation.md`](desktop-validation.md).
 | M4, transcription STT | Implémenté | STT OpenAI-compatible, health configurable partagé avec doctor, retries prudents, fallback et résultats segmentés |
 | M5, pipeline texte | Implémenté | packs français/anglais embarqués, protection des intentions, cleanup dégradable, rendu déterministe et runtime de plugin |
 | M6, livraison | Implémenté | clipboard, injection `wtype`, sinks paste/type/clipboard/stdout/file, livraison au plus une fois et clipboard-only |
-| M7, diagnostics et UI | Implémenté | doctor conditionnel sans `/models` implicite, journal JSONL rotatif sans texte, logging consommé, OSD configurable, notifications et son best-effort |
+| M7, diagnostics et UI | Implémenté | doctor conditionnel sans `/models` implicite, journal JSONL rotatif sans texte, logging consommé, barre QuickShell avec vumètre et repli automatique, OSD configurable, notifications et son best-effort |
 | M8, assemblage et livraison | Implémenté; validation desktop partielle | CLI complète, ré-exécution de session, orchestration réelle, acceptation automatisée, packaging T8.3 et CI Forgejo; T8.4 partiellement exécutée le 31 juillet 2026 |
 
 ## Détail M8
@@ -67,6 +67,7 @@ des essais et du rollback est consigné dans le compte-rendu daté
 | Pack anglais | Implémenté | intentions communes, typographie anglaise et indépendance du pack français |
 | Plugin Markdown | Implémenté, opt-in | fermetures lexicales, numéros d'items validés, capability netguard externe, timeout et repli sans tokens |
 | Helper OSD GTK | Implémenté, installation opt-in | protocole JSONL v1, helper/position/délais configurables, file non bloquante, relances bornées, layer-shell sans focus |
+| Barre QuickShell (#51) | Implémentée, déployée et validée par Mathieu | `auto`/`quickshell`, RMS/crêtes sur la capture existante, instantanés acquittés, repli notifications et reprise après reload; rendu Nord adaptatif dans les dotfiles, détails et limites dans [`quickshell.md`](quickshell.md) |
 
 ## Intégration continue
 
