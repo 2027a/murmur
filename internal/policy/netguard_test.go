@@ -12,7 +12,11 @@ import (
 )
 
 func TestClassify(t *testing.T) {
-	trusted := []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}
+	trusted := []netip.Prefix{
+		netip.MustParsePrefix("198.51.100.0/24"),
+		netip.MustParsePrefix("100.64.0.0/10"),
+		netip.MustParsePrefix("2001:db8::/32"),
+	}
 	tests := []struct {
 		ip   string
 		want Zone
@@ -26,6 +30,11 @@ func TestClassify(t *testing.T) {
 		{"169.254.10.20", LAN},
 		{"fe80::1", LAN},
 		{"198.51.100.42", LAN},
+		{"100.64.0.10", LAN},
+		{"::ffff:100.64.0.10", LAN},
+		{"2001:db8::42", LAN},
+		{"100.128.0.1", Internet},
+		{"2001:db9::42", Internet},
 		{"8.8.8.8", Internet},
 		{"2001:4860:4860::8888", Internet},
 	}

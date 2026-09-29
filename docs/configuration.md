@@ -223,7 +223,7 @@ La résolution refuse notamment:
   classe `policy_blocked` plutôt que `config_invalid`;
 - un plugin actif dont la zone déclarée est absente de `policy.plugin_zones`;
 - un provider `local` dont l'URL n'est manifestement pas locale;
-- une IP publique déclarée `lan`;
+- une IP publique déclarée `lan` sans être couverte par `trusted_networks`;
 - HTTP en zone `internet` sans `allow_insecure = true`;
 - un `health_endpoint` d'une autre origine que `base_url`, ou HTTP en zone
   `internet` sans le même opt-in `allow_insecure`;
@@ -255,6 +255,16 @@ répète avant credential helper, UI et recorder. `doctor` appelle la même fonc
 et s'arrête sur le même verdict avant tout check d'outil, source, credential ou
 réseau. Les constructeurs conservent leurs validations défensives pour leurs
 usages directs.
+
+Pour les IP littérales STT et cleanup, préflight et transport partagent la même
+classification : loopback en `local`, IP privée/link-local ou couverte par un
+CIDR `trusted_networks` en `lan`, autre IP en `internet`. La zone du provider
+est un plafond : un provider `lan` peut donc joindre le loopback, mais un réseau
+fiable n'autorise jamais une destination non loopback pour un provider `local`.
+Ainsi `100.64.0.10` peut être déclaré `lan` avec `trusted_networks=["100.64.0.0/10"]`.
+La zone déclarée doit toujours être autorisée pour le provider actif. Le
+préflight ne résout pas les noms DNS ; le transport vérifie les adresses
+résolues avant toute connexion.
 
 ## Profils de données
 
