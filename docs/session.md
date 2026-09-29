@@ -238,6 +238,14 @@ n'a aucun champ de transcript, secret, prompt ou corps provider. Comme tous les
 abonnés du bus, le journal peut abandonner des événements sous surcharge et ne
 constitue pas un audit exhaustif.
 
+L'ouverture du journal est non bloquante et refuse les symlinks finaux. Le
+fichier doit être régulier, appartenir à l'EUID et avoir un seul lien avant
+l'application du mode `0600`. Ces propriétés sont revérifiées après `chmod`.
+Une rotation mono-fichier diffère la troncature jusqu'à cette validation et
+l'applique sur le même descripteur, sans rouvrir le chemin. Une entrée incorrecte
+préexistante, notamment un hardlink ou un FIFO, est rejetée sans changer ses
+permissions ni tronquer son contenu.
+
 Le journal mémorise sa première erreur d'encodage, d'inspection, de rotation,
 d'écriture, de réouverture ou de fermeture. Son callback de dégradation ne reçoit
 que le nom fermé de l'opération: il ne repasse pas par le bus et ne peut donc ni

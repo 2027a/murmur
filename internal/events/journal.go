@@ -285,7 +285,9 @@ func openJournal(path string, flags int, operations *journalOperations) (*os.Fil
 }
 
 func secureOpenJournalFile(path string, flags int) (*os.File, error) {
-	fd, err := syscall.Open(path, flags|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0o600)
+	// O_TRUNC would mutate an existing inode before its ownership/type/link
+	// count can be checked. Defer truncation until this descriptor is validated.
+	fd, err := syscall.Open(path, (flags&^syscall.O_TRUNC)|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -294,30 +296,47 @@ func secureOpenJournalFile(path string, flags int) (*os.File, error) {
 		_ = syscall.Close(fd)
 		return nil, fmt.Errorf("descripteur du journal invalide")
 	}
+	if err := checkJournalDescriptor(fd, false); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
 	if err := syscall.Fchmod(fd, 0o600); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
-	var stat syscall.Stat_t
-	if err := syscall.Fstat(fd, &stat); err != nil {
+	if err := checkJournalDescriptor(fd, true); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
-	if stat.Mode&syscall.S_IFMT != syscall.S_IFREG {
-		_ = file.Close()
-		return nil, fmt.Errorf("le journal de session n'est pas un fichier régulier")
-	}
-	if stat.Uid != uint32(os.Geteuid()) {
-		_ = file.Close()
-		return nil, fmt.Errorf("propriétaire du journal de session invalide")
-	}
-	if stat.Nlink != 1 {
-		_ = file.Close()
-		return nil, fmt.Errorf("nombre de liens du journal de session invalide")
-	}
-	if stat.Mode&0o777 != 0o600 {
-		_ = file.Close()
-		return nil, fmt.Errorf("mode du journal de session invalide")
+	if flags&syscall.O_TRUNC != 0 {
+		if err := file.Truncate(0); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
 	}
 	return file, nil
+}
+
+func checkJournalDescriptor(fd int, private bool) error {
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	return validateJournalStat(stat, private)
+}
+
+func validateJournalStat(stat syscall.Stat_t, private bool) error {
+	if stat.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		return fmt.Errorf("le journal de session n'est pas un fichier régulier")
+	}
+	if stat.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("propriétaire du journal de session invalide")
+	}
+	if stat.Nlink != 1 {
+		return fmt.Errorf("nombre de liens du journal de session invalide")
+	}
+	if private && stat.Mode&0o777 != 0o600 {
+		return fmt.Errorf("mode du journal de session invalide")
+	}
+	return nil
 }
