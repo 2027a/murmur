@@ -298,6 +298,10 @@ choisi dans une liste fermée et un `message` borné. Les appels ne doivent jama
 recevoir transcript, prompt, corps HTTP, secret, argv ou cause externe brute;
 les dégradations OSD et D-Bus utilisent donc des messages d'opération constants.
 Une erreur d'écriture du logger est ignorée sans tentative de se logger elle-même.
+L'ouverture est non bloquante et refuse les symlinks finaux : un FIFO sans
+lecteur ne peut donc pas immobiliser `start` pendant qu'il tient le verrou.
+Le descripteur doit être régulier, appartenir à l'EUID et avoir un seul lien
+avant l'application et la revérification du mode `0600`.
 
 Lorsque `logging.session_journal=true`, la session écrit
 `session.jsonl`, puis `session.jsonl.1`, etc. dans ce même runtime. La rotation

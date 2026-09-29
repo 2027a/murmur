@@ -255,7 +255,9 @@ func (w *RotatingFile) rotate() error {
 }
 
 func openFile(path string, flags int) (*os.File, error) {
-	fd, err := syscall.Open(path, flags|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o600)
+	// A FIFO must fail validation without first waiting for a reader, including
+	// in OpenDestination while start already owns the session lock.
+	fd, err := syscall.Open(path, flags|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
 	if err != nil {
 		return nil, err
 	}
