@@ -94,7 +94,8 @@ Le module fait 24 px de large au repos et 18 px de haut. Pendant une session,
 sa largeur suit le texte affiché ou le vumètre avec sa durée. Il est placé à
 gauche du quota Codex, après les éléments du tiroir, dans le cartouche droit : fond
 bleu `#81a1c1`, icône sombre `#3b4252`, coins externes de 4 px gérés par le parent.
-Fonds Nord mauve `#b48ead` en écoute, transcription, correction et livraison, vert en succès, jaune en
+Fond Nord mauve `#b48ead` continu de l'écoute à la livraison, arrêt du micro
+compris, puis vert en succès. Jaune en
 annulation/dégradation, rouge en erreur. Le mouvement de traitement est un
 balayage, pas une estimation de progression.
 
