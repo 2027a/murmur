@@ -293,6 +293,10 @@ func (o *Orchestrator) runLive() error {
 	if err != nil {
 		return o.fail(err)
 	}
+	// Stop may own the capture when Abort is called, in which case Abort only
+	// observes its completion. Finalize every exit here, after the terminal
+	// result has closed the cancellation window and all producers have stopped.
+	defer func() { o.finishLiveCapture(recording, o.currentProvider()) }()
 	select {
 	case readyErr := <-recording.Ready():
 		if readyErr != nil {
@@ -411,26 +415,20 @@ func (o *Orchestrator) runLive() error {
 			<-transcribed
 		}
 		if o.machine.Result() != "" {
-			o.finishLiveCapture(recording, "")
 			return nil
 		}
 		if errs.Classify(stopErr) == errs.NoSpeech {
 			_ = o.machine.ApplyTerminal(NoSpeechCommand, o.currentProvider(), errs.NoSpeech)
-			o.finishLiveCapture(recording, "")
 			return nil
 		}
-		resultErr := o.fail(stopErr)
-		o.finishLiveCapture(recording, "")
-		return resultErr
+		return o.fail(stopErr)
 	}
 	if err := o.machine.Apply(CaptureStoppedCommand); err != nil {
 		<-forwarded
 		if earlyResult == nil {
 			<-transcribed
 		}
-		resultErr := o.fail(err)
-		o.finishLiveCapture(recording, "")
-		return resultErr
+		return o.fail(err)
 	}
 	<-forwarded
 	var outcome transcriptionOutcome
@@ -443,9 +441,7 @@ func (o *Orchestrator) runLive() error {
 	if outcome.err == nil {
 		o.publish(events.ProviderSelected, provider, "", "", 0, 0)
 	}
-	resultErr := o.completeTranscript(outcome.result.Text, provider, outcome.result.Warnings, outcome.err)
-	o.finishLiveCapture(recording, provider)
-	return resultErr
+	return o.completeTranscript(outcome.result.Text, provider, outcome.result.Warnings, outcome.err)
 }
 
 // A terminal result closes the cancellation window before retention is decided.
