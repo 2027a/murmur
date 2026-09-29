@@ -36,7 +36,7 @@ func Render(text string, protection Protection, pack *Pack, asciiQuotes bool) (s
 			chunks[i+1] = trimLeadingPunctuation(chunks[i+1], ".,")
 		case CloseQuote:
 			chunks[i] = trimTrailingPunctuation(chunks[i], ".,")
-			chunks[i+1] = strings.TrimLeft(chunks[i+1], " \t")
+			chunks[i+1] = spaceAfterClosingQuote(chunks[i+1])
 		case LineBreak, ParagraphBreak:
 			chunks[i] = trimTrailingPunctuation(strings.TrimRight(chunks[i], "\r\n"), ".,;:!?")
 			chunks[i+1] = trimLeadingPunctuation(strings.TrimLeft(chunks[i+1], "\r\n"), ".,;:!?")
@@ -55,7 +55,11 @@ func Render(text string, protection Protection, pack *Pack, asciiQuotes bool) (s
 		out.WriteString(chunks[i])
 		switch token.Intent {
 		case OpenQuote:
-			if chunks[i] != "" && !strings.HasSuffix(chunks[i], "\n") && !strings.HasSuffix(chunks[i], "\r") {
+			separate := chunks[i] != "" && !strings.HasSuffix(chunks[i], "\n") && !strings.HasSuffix(chunks[i], "\r")
+			if i > 0 && protection.Tokens[i-1].Intent == CloseQuote && chunks[i] == "" {
+				separate = true
+			}
+			if separate {
 				out.WriteByte(' ')
 			}
 			out.WriteString(open)
@@ -75,6 +79,20 @@ func Render(text string, protection Protection, pack *Pack, asciiQuotes bool) (s
 		}
 	}
 	return result, nil
+}
+
+// Closing quotes attach to punctuation and line breaks, but must not join
+// following prose (even if cleanup removed the original separator).
+func spaceAfterClosingQuote(text string) string {
+	text = strings.TrimLeft(text, " \t")
+	if text == "" {
+		return text
+	}
+	r, _ := utf8.DecodeRuneInString(text)
+	if r == '\n' || r == '\r' || strings.ContainsRune(".,;:!?…)]}»”", r) {
+		return text
+	}
+	return " " + text
 }
 
 func trimTrailingPunctuation(text, punctuation string) string {

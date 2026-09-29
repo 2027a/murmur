@@ -34,8 +34,12 @@ réglage `general.ascii_quotes=true` active le rendu ASCII `" texte "`. Il est
 transmis par `core.BuildProcessor`, donc identique pour les sessions et les
 commandes composables. Les ponctuations
 parasites `.,;:!?` accolées aux commandes de ligne/paragraphe sont supprimées;
-les virgules et points accolés à une commande de guillemet sont normalisés. Un
-texte sans commande reste strictement inchangé en mode plain.
+les virgules et points accolés à une commande de guillemet sont normalisés.
+Après une fermeture de guillemets, la prose et une nouvelle citation sont
+séparées par un espace; une ponctuation à accoler ou un saut de ligne n'ajoute
+pas d'espace. Cette règle vaut pour les deux packs et le mode ASCII, même si le
+cleanup a supprimé le séparateur devant la prose. Un texte sans commande reste
+strictement inchangé en mode plain.
 
 ## Protection du cleanup
 
