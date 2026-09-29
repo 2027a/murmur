@@ -11,6 +11,7 @@ import (
 
 	"git.2027a.net/2027a/murmur/internal/errs"
 	"git.2027a.net/2027a/murmur/internal/httpurl"
+	"git.2027a.net/2027a/murmur/internal/policy"
 )
 
 const (
@@ -128,10 +129,13 @@ func Validate(cfg Config) error {
 	if cfg.Plugin.Enabled && !contains(cfg.Policy.PluginZones, "local") {
 		return policyError("le plugin sélectionné utilise la zone local, interdite par policy.plugin_zones")
 	}
-	for _, prefix := range cfg.Policy.TrustedNetworks {
-		if _, err := netip.ParsePrefix(prefix); err != nil {
-			return configError(fmt.Sprintf("policy.trusted_networks contient un CIDR invalide: %s", prefix))
+	trusted := make([]netip.Prefix, 0, len(cfg.Policy.TrustedNetworks))
+	for _, value := range cfg.Policy.TrustedNetworks {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return configError(fmt.Sprintf("policy.trusted_networks contient un CIDR invalide: %s", value))
 		}
+		trusted = append(trusted, prefix)
 	}
 
 	if _, ok := cfg.STT.Providers[cfg.STT.Provider]; !ok || cfg.STT.Provider == "" {
@@ -146,7 +150,7 @@ func Validate(cfg Config) error {
 		}
 	}
 	for _, name := range orderedProviderNames(cfg.STT.Providers, cfg.STT.Provider, cfg.STT.Fallback) {
-		if err := validateProvider("stt.providers."+name, cfg.STT.Providers[name]); err != nil {
+		if err := validateProvider("stt.providers."+name, cfg.STT.Providers[name], trusted); err != nil {
 			return err
 		}
 	}
@@ -174,7 +178,7 @@ func Validate(cfg Config) error {
 		}
 	}
 	for _, name := range orderedProviderNames(cfg.Cleanup.Providers, cfg.Cleanup.Provider) {
-		if err := validateCleanupProvider("cleanup.providers."+name, cfg.Cleanup.Providers[name]); err != nil {
+		if err := validateCleanupProvider("cleanup.providers."+name, cfg.Cleanup.Providers[name], trusted); err != nil {
 			return err
 		}
 	}
@@ -204,11 +208,11 @@ func ValidateClipboardOnly(cfg Config, enabled bool) error {
 	return nil
 }
 
-func validateProvider(path string, provider ProviderConfig) error {
+func validateProvider(path string, provider ProviderConfig, trusted []netip.Prefix) error {
 	if strings.TrimSpace(provider.Model) == "" {
 		return configError(path + ".model ne peut pas être vide")
 	}
-	if err := validateHTTPProvider(path, provider.Type, provider.BaseURL, provider.TimeoutS, provider.Zone, provider.AllowInsecure, provider.credentials()); err != nil {
+	if err := validateHTTPProvider(path, provider.Type, provider.BaseURL, provider.TimeoutS, provider.Zone, provider.AllowInsecure, provider.credentials(), trusted); err != nil {
 		return err
 	}
 	if provider.Retries < 0 || provider.Retries > MaximumProviderRetries {
@@ -236,17 +240,17 @@ func validateProvider(path string, provider ProviderConfig) error {
 	return nil
 }
 
-func validateCleanupProvider(path string, provider CleanupProviderConfig) error {
+func validateCleanupProvider(path string, provider CleanupProviderConfig, trusted []netip.Prefix) error {
 	if strings.TrimSpace(provider.Model) == "" {
 		return configError(path + ".model ne peut pas être vide")
 	}
 	if !oneOf(provider.ReasoningEffort, "", "none", "minimal", "low", "medium", "high", "xhigh", "max") {
 		return configError(path + ".reasoning_effort doit être vide ou valoir none, minimal, low, medium, high, xhigh ou max")
 	}
-	return validateHTTPProvider(path, provider.Type, provider.BaseURL, provider.TimeoutS, provider.Zone, provider.AllowInsecure, provider.credentials())
+	return validateHTTPProvider(path, provider.Type, provider.BaseURL, provider.TimeoutS, provider.Zone, provider.AllowInsecure, provider.credentials(), trusted)
 }
 
-func validateHTTPProvider(path, providerType, baseURL string, timeoutS int, zone string, allowInsecure bool, credentials CredentialConfig) error {
+func validateHTTPProvider(path, providerType, baseURL string, timeoutS int, zone string, allowInsecure bool, credentials CredentialConfig, trusted []netip.Prefix) error {
 	if providerType != "openai-compatible" {
 		return configError(path + ".type doit valoir openai-compatible")
 	}
@@ -275,11 +279,13 @@ func validateHTTPProvider(path, providerType, baseURL string, timeoutS int, zone
 	}
 	host := parsed.Hostname()
 	ip := net.ParseIP(host)
-	if zone == "local" && !(strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback())) {
+	// Classify literal IPs with the transport's rules and zone ceiling. Do not
+	// resolve hostnames here: DNS destinations are checked again at dial time.
+	if zone == "local" && !(strings.EqualFold(host, "localhost") || (ip != nil && policy.Classify(ip, trusted) == policy.Local)) {
 		return configError(path + " déclare une zone local mais base_url n'est pas locale")
 	}
-	if zone == "lan" && ip != nil && !(ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
-		return configError(path + " déclare une zone lan mais base_url contient une IP publique")
+	if zone == "lan" && ip != nil && policy.Classify(ip, trusted) > policy.LAN {
+		return configError(path + " déclare une zone lan mais base_url contient une IP publique non fiable")
 	}
 	return nil
 }
