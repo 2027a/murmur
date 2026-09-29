@@ -15,7 +15,7 @@ dans [`desktop-validation.md`](desktop-validation.md).
 | M5, pipeline texte | Implémenté | packs français/anglais embarqués, protection des intentions, cleanup dégradable, rendu déterministe et runtime de plugin |
 | M6, livraison | Implémenté | clipboard, injection `wtype`, sinks paste/type/clipboard/stdout/file, livraison au plus une fois et clipboard-only |
 | M7, diagnostics et UI | Implémenté | doctor conditionnel sans `/models` implicite, journal JSONL rotatif sans texte, logging consommé, barre QuickShell avec vumètre et repli automatique, OSD configurable, notifications et son best-effort |
-| M8, assemblage et livraison | Implémenté; validation desktop partielle | CLI complète, ré-exécution de session, orchestration réelle, acceptation automatisée, packaging T8.3 et CI Forgejo; T8.4 partiellement exécutée le 31 juillet 2026 |
+| M8, assemblage et livraison | Implémenté; validation desktop partielle | CLI complète, ré-exécution de session, orchestration réelle, acceptation automatisée, packaging T8.3; T8.4 partiellement exécutée le 31 juillet 2026 |
 
 ## Détail M8
 
@@ -69,33 +69,20 @@ des essais et du rollback est consigné dans le compte-rendu daté
 | Helper OSD GTK | Implémenté, installation opt-in | protocole JSONL v1, helper/position/délais configurables, file non bloquante, relances bornées, layer-shell sans focus |
 | Barre QuickShell (#51) | Implémentée, déployée et validée par Mathieu | `auto`/`quickshell`, RMS/crêtes sur la capture existante, instantanés acquittés, repli notifications et reprise après reload; rendu Nord adaptatif dans les dotfiles, détails et limites dans [`quickshell.md`](quickshell.md) |
 
-## Intégration continue
+## Validation locale
 
-Le workflow Forgejo [`.forgejo/workflows/ci.yml`](../.forgejo/workflows/ci.yml)
-exécute sur un runner natif linux/amd64, avec Go 1.23.12 et 1.26.5, `go mod
-verify`, `make lint`, `go test -race ./...`, `make build` et `make
-installcheck`. Les tests Python du helper OSD s'exécutent aussi avec des modules
-GTK factices et n'exigent donc que la bibliothèque standard. `make test` inclut
-également les régressions d'`installcheck` : installation, assertion, exécution
-ou désinstallation en échec doivent arrêter le contrôle et nettoyer le staging.
-Ces tests utilisent un binaire factice, sans reconstruire Go. Le binaire installé
-est réellement exécuté sur amd64. Le cache Actions est désactivé, les caches Go
-de compilation et de tests sont purgés, puis les modules verrouillés sont rendus
-disponibles et vérifiés. Les étapes shell neutralisent explicitement les jetons
-automatiques `FORGEJO_TOKEN` et `GITHUB_TOKEN`; les contrôles utilisent ensuite
-`GOPROXY=off` et n'exigent ni desktop ni service réseau externe.
+Les contrôles sont exécutés localement, sans workflow de CI distante :
 
-Pour chaque version Go, un job distinct cross-compile aussi le binaire
-linux/arm64 avec `CGO_ENABLED=0` et vérifie les métadonnées de l'exécutable. Il
-ne l'exécute pas et ne prétend donc pas couvrir le détecteur de courses sur
-arm64. Aucun label de runner arm64 natif n'est publiquement consultable sur la
-forge; cette séparation évite de masquer une émulation QEMU fragile derrière
-une matrice d'architectures.
+```sh
+make lint test module-check installcheck GO_TEST_FLAGS='-race -count=1'
+```
 
-Tous les jobs ont une limite globale et chaque commande longue a son propre
-délai. Aucun échec n'est toléré et aucun résultat de commande n'est restauré
-depuis un cache. Pour rendre ces statuts strictement bloquants à la fusion, la
-protection de la branche Forgejo doit exiger les quatre jobs de la matrice.
+`make test` inclut les tests Go sous le détecteur de courses, les tests Python
+du helper OSD avec des modules GTK factices, et les régressions d'`installcheck`.
+Ces dernières injectent des échecs d'installation, d'assertion, d'exécution et
+de désinstallation avec un binaire factice, sans reconstruire Go. Elles
+vérifient l'arrêt du contrôle et le nettoyage du staging. `make installcheck`
+construit et exécute le vrai binaire dans une installation temporaire.
 
 ## Limite de validation
 
