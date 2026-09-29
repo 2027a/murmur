@@ -75,7 +75,10 @@ Le workflow Forgejo [`.forgejo/workflows/ci.yml`](../.forgejo/workflows/ci.yml)
 exécute sur un runner natif linux/amd64, avec Go 1.23.12 et 1.26.5, `go mod
 verify`, `make lint`, `go test -race ./...`, `make build` et `make
 installcheck`. Les tests Python du helper OSD s'exécutent aussi avec des modules
-GTK factices et n'exigent donc que la bibliothèque standard. Le binaire installé
+GTK factices et n'exigent donc que la bibliothèque standard. `make test` inclut
+également les régressions d'`installcheck` : installation, assertion, exécution
+ou désinstallation en échec doivent arrêter le contrôle et nettoyer le staging.
+Ces tests utilisent un binaire factice, sans reconstruire Go. Le binaire installé
 est réellement exécuté sur amd64. Le cache Actions est désactivé, les caches Go
 de compilation et de tests sont purgés, puis les modules verrouillés sont rendus
 disponibles et vérifiés. Les étapes shell neutralisent explicitement les jetons

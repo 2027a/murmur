@@ -55,7 +55,10 @@ Les variables d'installation et leur valeur par défaut sont:
 | `INSTALL_OSD` | `0` | installe le helper avec `1`; doit aussi valoir `1` pour le désinstaller |
 
 `make installcheck` effectue installation, exécution du binaire installé et
-désinstallation dans un `DESTDIR` temporaire. Les fichiers installés sont
+désinstallation dans un `DESTDIR` temporaire. Il s'arrête au premier échec et
+nettoie le staging même dans ce cas. `make test-installcheck`, inclus dans
+`make test`, vérifie ce contrôle avec des pannes injectées et un binaire factice;
+`make installcheck` reste le contrôle avec le vrai binaire Go. Les fichiers installés sont
 autonomes: le binaire embarque les packs de commandes et le helper OSD est un
 script complet; aucun chemin vers le checkout n'est requis à l'exécution.
 

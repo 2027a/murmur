@@ -33,19 +33,22 @@ DOC_FILES := \
 	text-pipeline.md
 EXAMPLE_FILES := config.minimal.toml config.full.toml latency-corpus.fr.txt
 
-.PHONY: build test test-go test-osd lint module-check vuln-check clean install uninstall installcheck check-install-vars
+.PHONY: build test test-go test-osd test-installcheck lint module-check vuln-check clean install uninstall installcheck check-install-vars
 
 build:
 	mkdir -p build
 	$(GO) build -trimpath -o build/murmur ./cmd/murmur
 
-test: test-go test-osd
+test: test-go test-osd test-installcheck
 
 test-go:
 	$(GO) test $(GO_TEST_FLAGS) ./...
 
 test-osd:
 	$(PYTHON) -m unittest helpers/osd-gtk/test_murmur_osd.py
+
+test-installcheck:
+	$(PYTHON) -m unittest helpers/test_installcheck.py
 
 lint:
 	test -z "$$(gofmt -l .)"
@@ -110,7 +113,8 @@ uninstall: check-install-vars
 	@rmdir "$(DESTDIR)$(DOCDIR)/docs" "$(DESTDIR)$(DOCDIR)/examples" "$(DESTDIR)$(DOCDIR)" 2>/dev/null || true
 
 installcheck: build
-	@root="$$(mktemp -d)"; \
+	@set -eu; \
+	root="$$(mktemp -d)"; \
 	trap 'rm -rf "$$root"' EXIT HUP INT TERM; \
 	install -d "$$root/without-osd/usr/bin" "$$root/without-osd/usr/share/doc/murmur"; \
 	printf '%s\n' sentinel >"$$root/without-osd/usr/bin/murmur-osd"; \
