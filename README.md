@@ -363,9 +363,9 @@ nouvelle session peut démarrer.
 ## UI
 
 `ui.mode="notify"` utilise les notifications freedesktop, remplace la
-notification précédente et se dégrade en no-op si D-Bus est absent. Leur titre
-suit le format compact `🟢 ACTION`, avec un rond orange en cas d'annulation et
-un rond rouge en cas d'erreur ou d'échec.
+notification précédente et se dégrade en no-op si D-Bus est absent. Le titre
+est « Murmur », avec un texte court : « Écoute en cours », « Transcription en
+cours », « Dictée terminée » ou « Dictée annulée ».
 `ui.mode="osd"` lance `murmur-osd` et lui transmet des états JSONL sans texte
 dicté; sa panne n'interrompt ni transcription ni livraison. L'installation OSD
 est volontairement optionnelle car elle ajoute Python/GTK/gtk-layer-shell.

@@ -13,9 +13,6 @@ import (
 )
 
 const (
-	notificationPrefix       = "🟢 "
-	cancelNotificationPrefix = "🟠 "
-	errorNotificationPrefix  = "🔴 "
 	notificationCallTimeout  = 2 * time.Second
 	notificationCloseTimeout = notificationCallTimeout + 250*time.Millisecond
 )
@@ -193,48 +190,39 @@ func notificationForEvent(event events.Event) (Notification, bool) {
 	if backgroundProgress(event) {
 		return Notification{}, false
 	}
-	n := Notification{Urgency: 1, TimeoutMS: 2200}
+	n := Notification{Summary: "Murmur", Urgency: 1, TimeoutMS: 2200}
 	switch event.Type {
 	case events.SessionStarted:
-		n.Summary = notificationPrefix + "DÉMARRAGE"
-		n.Body = "Initialisation du microphone"
+		n.Body = "Démarrage de la capture"
 		n.Category = "murmur.starting"
 	case events.CaptureReady:
-		n.Summary = notificationPrefix + "ÉCOUTE"
-		n.Body = "Microphone actif. Dictez maintenant."
+		n.Body = "Écoute en cours"
 		n.Category = "murmur.recording"
 		n.TimeoutMS = 0
 	case events.StateChanged:
 		switch event.State {
 		case "stopping":
-			n.Summary = notificationPrefix + "ARRÊT"
-			n.Body = "Finalisation de la capture"
+			n.Body = "Arrêt de la capture"
 			n.Category = "murmur.stopping"
 		case "transcribing":
-			n.Summary = notificationPrefix + "TRANSCRIPTION"
-			n.Body = "Reconnaissance vocale en cours"
+			n.Body = "Transcription en cours"
 			n.Category = "murmur.processing"
 		case "processing":
-			n.Summary = notificationPrefix + "TRAITEMENT"
-			n.Body = "Préparation du texte final"
+			n.Body = "Traitement en cours"
 			n.Category = "murmur.processing"
 		case "delivering":
-			n.Summary = notificationPrefix + "LIVRAISON"
-			n.Body = "Envoi vers l’application active"
+			n.Body = "Livraison en cours"
 			n.Category = "murmur.processing"
 		default:
 			return Notification{}, false
 		}
 	case events.PartialStarted:
-		n.Summary = notificationPrefix + "TRANSCRIPTION"
 		n.Body = progressLabel("Transcription", event.Partial, event.Total)
 		n.Category = "murmur.processing"
 	case events.PartialDone:
-		n.Summary = notificationPrefix + "TRANSCRIPTION"
 		n.Body = progressLabel("Segment terminé", event.Partial, event.Total)
 		n.Category = "murmur.processing"
 	case events.PartialFailed, events.Degraded:
-		n.Summary = errorNotificationPrefix + "ATTENTION"
 		n.Body = "Fonctionnement dégradé"
 		n.Category = "murmur.warning"
 		n.Urgency = 2
@@ -244,23 +232,19 @@ func notificationForEvent(event events.Event) (Notification, bool) {
 	case events.Terminal:
 		switch event.Result {
 		case "completed":
-			n.Summary = notificationPrefix + "TERMINÉ"
-			n.Body = "Texte livré avec succès"
+			n.Body = "Dictée terminée"
 			n.Category = "murmur.success"
 			n.TimeoutMS = 3500
 		case "cancelled":
-			n.Summary = cancelNotificationPrefix + "ANNULÉ"
-			n.Body = "Aucun texte n’a été livré"
+			n.Body = "Dictée annulée"
 			n.Category = "murmur.cancelled"
 			n.TimeoutMS = 3500
 		case "no_speech":
-			n.Summary = notificationPrefix + "AUCUNE PAROLE"
-			n.Body = "Aucun texte n’a été livré"
+			n.Body = "Aucune parole détectée"
 			n.Category = "murmur.warning"
 			n.TimeoutMS = 4500
 		default:
-			n.Summary = errorNotificationPrefix + "ÉCHEC"
-			n.Body = "La dictée n’a pas pu être livrée"
+			n.Body = "Échec de la dictée"
 			n.Category = "murmur.error"
 			n.Urgency = 2
 			n.TimeoutMS = 6000
