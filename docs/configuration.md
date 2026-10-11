@@ -69,8 +69,9 @@ déterministe afin que toutes les commandes retrouvent la même session.
 | `sink.mode` | `paste` | `paste`, `type`, `clipboard`, `stdout`, `file`, `auto` |
 | `sink.auto_mode` | `paste` | choix explicite `paste` ou `type` lorsque `mode=auto` |
 | `sink.clipboard_mode` | `clean-only` | `raw-and-clean`, `clean-only`, `none`, `transient` |
-| `sink.paste_shortcuts` | liste usuelle | liste ordonnée parmi `ctrl+shift+v`, `shift+insert`, `ctrl+v`; seul le premier raccourci est émis |
+| `sink.paste_shortcuts` | `["ctrl+v"]` | raccourci par défaut : premier élément parmi `ctrl+shift+v`, `shift+insert`, `ctrl+v`, sauf règle correspondante; liste vide = frappe |
 | `sink.paste_backend` | `wtype` | `wtype` ou `hyprland`; seulement pour les raccourcis de collage; pas de repli après échec |
+| `sink.paste_rules` | `[]` | tables `{ class, shortcut }`, au plus 64; exige `hyprland`; classe exacte sans distinction de casse (256 octets max), première correspondance prioritaire |
 | `sink.type_newlines` | `space` | `space`, `marker`, `dangerous-keep`; ce dernier autorise explicitement les LF en injection active |
 | `sink.file` | vide | obligatoire pour le sink `file` |
 | `ui.mode` | `notify` | `auto`, `quickshell`, `osd`, `notify`, `none` |

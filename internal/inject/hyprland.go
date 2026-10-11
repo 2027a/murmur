@@ -47,19 +47,22 @@ func hyprlandProvider(ctx context.Context, executor sysexec.Executor) (string, e
 	}
 }
 
-func hyprlandWindow(ctx context.Context, executor sysexec.Executor) (string, error) {
+type hyprlandTarget struct {
+	Address string `json:"address"`
+	Class   string `json:"class"`
+}
+
+func hyprlandWindow(ctx context.Context, executor sysexec.Executor) (hyprlandTarget, error) {
 	output, err := runHyprland(ctx, executor, []string{"-j", "activewindow"})
 	if err != nil {
-		return "", err
+		return hyprlandTarget{}, err
 	}
-	var window struct {
-		Address string `json:"address"`
-	}
+	var window hyprlandTarget
 	if json.Unmarshal(output, &window) != nil || !validWindowAddress(window.Address) {
 		// Do not include the response: it can contain private window titles.
-		return "", commandError(ctx, "aucune fenêtre Hyprland active valide", errors.New("adresse de fenêtre invalide"))
+		return hyprlandTarget{}, commandError(ctx, "aucune fenêtre Hyprland active valide", errors.New("adresse de fenêtre invalide"))
 	}
-	return window.Address, nil
+	return window, nil
 }
 
 func validWindowAddress(address string) bool {
@@ -89,9 +92,12 @@ func (i *Injector) pasteHyprland(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	address, err := hyprlandWindow(ctx, i.executor)
+	window, err := hyprlandWindow(ctx, i.executor)
 	if err != nil {
 		return err
+	}
+	if len(i.rules) > 0 && !validPasteClass(window.Class) {
+		return commandError(ctx, "classe de fenêtre active indisponible pour les règles de collage", errors.New("sélection du raccourci impossible"))
 	}
 	// Do not redirect a paste to a different window if focus changed during
 	// preparation. The explicit selector also prevents following later focus
@@ -100,11 +106,12 @@ func (i *Injector) pasteHyprland(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if current != address {
+	if current.Address != window.Address || (len(i.rules) > 0 && current.Class != window.Class) {
 		return commandError(ctx, "la fenêtre active a changé avant le collage", errors.New("collage annulé"))
 	}
 
-	mods, key := hyprlandShortcut(i.shortcut)
+	mods, key := hyprlandShortcut(i.shortcutForClass(window.Class))
+	address := window.Address
 	var args []string
 	if provider == "lua" {
 		// Only fixed shortcut components and a validated hexadecimal address

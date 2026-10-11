@@ -29,6 +29,7 @@ func TestHyprlandDoctorIsConditionalAndNeverSendsKeys(t *testing.T) {
 			cfg := config.Defaults()
 			cfg.Sink.Mode, cfg.Sink.AutoMode, cfg.Sink.ClipboardMode = test.mode, test.auto, test.clipboard
 			cfg.Sink.PasteBackend, cfg.Sink.PasteShortcuts = "hyprland", test.shortcuts
+			cfg.Sink.PasteRules = []config.PasteRule{{Class: "kitty", Shortcut: "ctrl+shift+v"}}
 			cfg.UI.Mode = "none"
 			var tools []string
 			executor := &sysexec.FakeExecutor{RunFunc: func(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error) {

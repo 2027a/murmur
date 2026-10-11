@@ -4,7 +4,7 @@ La livraison finale implémente six modes:
 
 | Mode | Effet |
 |---|---|
-| `paste` | copie le texte selon la politique clipboard, puis émet le premier raccourci configuré ou frappe directement si la liste est vide |
+| `paste` | copie le texte selon la politique clipboard, puis émet le raccourci de la règle correspondante ou le premier raccourci configuré; frappe directement si la liste est vide |
 | `type` | transmet le texte à `wtype -` |
 | `clipboard` | conserve le texte final dans un presse-papiers persistant |
 | `stdout` | écrit le texte suivi d'un retour à la ligne |
@@ -95,7 +95,8 @@ Toute autre chaîne dans `paste_shortcuts` est une erreur de configuration avant
 fork ou construction de l'injecteur. `inject.New` répète ce contrôle pour les
 appels directs.
 
-`paste` n'émet qu'une seule tentative active: le premier raccourci configuré. Ce
+`paste` n’émet qu’une seule tentative active : la règle par application
+correspondante, ou le premier raccourci configuré. Ce
 succès signifie seulement que la commande a été émise, pas que l'application
 cible a accepté le collage. Si cette émission échoue techniquement, la livraison
 échoue; la frappe directe `wtype -` n'est utilisée que lorsque `paste_shortcuts`
@@ -104,16 +105,20 @@ est vide.
 ### Backend Hyprland
 
 `sink.paste_backend="wtype"` reste le défaut portable. Le choix explicite
-`"hyprland"` émet le même premier raccourci via le compositeur, sans clavier
-virtuel `wtype`. Il est notamment utile pour Ctrl+Maj+V dans Telegram Desktop
-(Qt), Chromium et les terminaux, sans imposer Ctrl+V à toutes les applications.
+`"hyprland"` émet le raccourci sélectionné via le compositeur, sans clavier
+virtuel `wtype`. Le défaut est Ctrl+V pour les champs GTK/Qt et les navigateurs;
+les terminaux peuvent recevoir Ctrl+Maj+V via une règle.
 
 ```toml
 [sink]
 mode = "paste"
 clipboard_mode = "clean-only"
 paste_backend = "hyprland"
-paste_shortcuts = ["ctrl+shift+v"]
+paste_shortcuts = ["ctrl+v"]
+
+[[sink.paste_rules]]
+class = "kitty"
+shortcut = "ctrl+shift+v"
 ```
 
 Ce backend exige `hyprctl -j status` (Hyprland 0.55+) et une session joignable.
@@ -145,6 +150,41 @@ sur `wtype`. Le texte final reste dans le presse-papiers persistant. Le mode
 `--clipboard-only` n’interroge jamais Hyprland. `type`, `paste+none` et les
 raccourcis vides continuent à utiliser `wtype -`, même si le backend configuré
 est `hyprland`.
+
+### Sélection par application
+
+Les tables `[[sink.paste_rules]]` exigent `paste_backend="hyprland"` et acceptent
+`class` et `shortcut`. La comparaison utilise la classe courante `class` de
+`hyprctl -j activewindow`, exactement et sans distinction de casse. Ni glob,
+regex, titre de fenêtre, toolkit supposé, ni détection par nom de processus.
+La première correspondance gagne; sinon, le premier élément de
+`paste_shortcuts` est utilisé. Le défaut compilé est désormais `["ctrl+v"]`;
+une ancienne liste explicite, notamment `["ctrl+shift+v"]`, n’est jamais réécrite.
+
+Au plus 64 règles sont acceptées. Une classe de règle doit être non vide, UTF-8
+valide, sans contrôles ni espaces aux extrémités, et faire au plus 256 octets.
+Le raccourci appartient à la même liste blanche que `paste_shortcuts`.
+Le constructeur copie les règles pour éviter une mutation par l’appelant.
+
+Avec des règles, l’absence de classe exploitable rend `sink_failed` plutôt que
+de deviner le raccourci d’un terminal. La seconde lecture doit confirmer à la
+fois l’adresse et la classe. Un échec d’émission de la règle ne déclenche jamais
+le raccourci par défaut, une autre règle ou une frappe.
+
+Les règles n’ajoutent aucun appel de commande aux chemins `type`,
+`paste+none`, `paste_shortcuts=[]` et `--clipboard-only`. Une liste vide force
+toujours la frappe, même si une règle existe. Les règles configurées avec
+`wtype` sont refusées plutôt qu’ignorées silencieusement; cette première
+implémentation ne fournit pas de sélection par application pour les autres
+compositeurs.
+
+**Limite : les terminaux intégrés** à Geany, VS Code ou un IDE partagent la
+classe de l’éditeur. Cette version ne les distingue pas par accessibilité.
+Ne pas considérer une règle d’application comme une détection du champ focalisé.
+Dans un tel terminal, utiliser `--clipboard-only` et son collage manuel, ou
+désactiver la livraison active dans ce contexte. Les raccourcis personnalisés
+et les applications qui bloquent le collage peuvent demander des règles
+explicites : aucune garantie universelle de consommation n’est annoncée.
 
 La correction de `shift+insert` n’en fait pas un raccourci universel : certains
 terminaux, dont Kitty par défaut, collent la sélection PRIMARY plutôt que

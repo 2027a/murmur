@@ -72,7 +72,11 @@ func New(cfg config.Config, options Options) (Sink, error) {
 	switch mode {
 	case Paste, Type:
 		activeNewlines = inject.NewlineMode(cfg.Sink.TypeNewlines)
-		injector, err := inject.NewWithBackend(options.Executor, cfg.Sink.PasteShortcuts, activeNewlines, inject.PasteBackend(cfg.Sink.PasteBackend))
+		rules := make([]inject.PasteRule, len(cfg.Sink.PasteRules))
+		for j, rule := range cfg.Sink.PasteRules {
+			rules[j] = inject.PasteRule{Class: rule.Class, Shortcut: rule.Shortcut}
+		}
+		injector, err := inject.NewWithBackend(options.Executor, cfg.Sink.PasteShortcuts, activeNewlines, inject.PasteBackend(cfg.Sink.PasteBackend), rules...)
 		if err != nil {
 			return nil, err
 		}

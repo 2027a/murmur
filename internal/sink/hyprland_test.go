@@ -39,7 +39,7 @@ func TestHyprlandSinkDelivery(t *testing.T) {
 			{Name: "hyprctl", Args: []string{"-j", "status"}},
 			{Name: "hyprctl", Args: []string{"-j", "activewindow"}},
 			{Name: "hyprctl", Args: []string{"-j", "activewindow"}},
-			{Name: "hyprctl", Args: []string{"dispatch", `hl.dsp.send_shortcut({mods="CTRL SHIFT",key="v",window="address:0x123"})`}},
+			{Name: "hyprctl", Args: []string{"dispatch", `hl.dsp.send_shortcut({mods="CTRL",key="v",window="address:0x123"})`}},
 		}
 		if !reflect.DeepEqual(executor.Calls(), want) {
 			t.Fatalf("mode=%s calls=%#v", mode, executor.Calls())

@@ -71,6 +71,9 @@ func Validate(cfg Config) error {
 	if !oneOf(cfg.Sink.PasteBackend, "wtype", "hyprland") {
 		return configError("sink.paste_backend doit valoir wtype ou hyprland")
 	}
+	if err := validatePasteRules(cfg.Sink); err != nil {
+		return err
+	}
 	if !oneOf(cfg.Sink.ClipboardMode, "raw-and-clean", "clean-only", "none", "transient") {
 		return configError("sink.clipboard_mode invalide")
 	}
