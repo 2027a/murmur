@@ -124,6 +124,7 @@ func applyEnvironment(cfg *Config, lookup func(string) (string, bool), explicit 
 		"MURMUR_PLUGIN_MODE":         {&cfg.Plugin.Mode, "plugin.mode"},
 		"MURMUR_SINK_MODE":           {&cfg.Sink.Mode, "sink.mode"},
 		"MURMUR_SINK_AUTO_MODE":      {&cfg.Sink.AutoMode, "sink.auto_mode"},
+		"MURMUR_SINK_PASTE_BACKEND":  {&cfg.Sink.PasteBackend, "sink.paste_backend"},
 		"MURMUR_SINK_CLIPBOARD_MODE": {&cfg.Sink.ClipboardMode, "sink.clipboard_mode"},
 		"MURMUR_SINK_FILE":           {&cfg.Sink.File, "sink.file"},
 		"MURMUR_UI_MODE":             {&cfg.UI.Mode, "ui.mode"},
@@ -278,6 +279,7 @@ func applyOverrides(cfg *Config, o Overrides, explicit map[string]bool) {
 	setBool(o.RetainDiagnostics, &cfg.Policy.RetainDiagnostics)
 	setString(o.SinkMode, &cfg.Sink.Mode)
 	setString(o.SinkAutoMode, &cfg.Sink.AutoMode)
+	setString(o.PasteBackend, &cfg.Sink.PasteBackend)
 	setString(o.ClipboardMode, &cfg.Sink.ClipboardMode)
 	setString(o.SinkFile, &cfg.Sink.File)
 	setString(o.UIMode, &cfg.UI.Mode)

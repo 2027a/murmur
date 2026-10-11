@@ -53,7 +53,7 @@ func TestPasteShortcutArguments(t *testing.T) {
 		args     []string
 	}{
 		{"ctrl+shift+v", []string{"-M", "ctrl", "-M", "shift", "v", "-m", "shift", "-m", "ctrl"}},
-		{"shift+insert", []string{"-M", "shift", "Insert", "-m", "shift"}},
+		{"shift+insert", []string{"-M", "shift", "-k", "Insert", "-m", "shift"}},
 		{"ctrl+v", []string{"-M", "ctrl", "v", "-m", "ctrl"}},
 	}
 	for _, test := range tests {

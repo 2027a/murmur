@@ -44,7 +44,7 @@ n'est pas détachée.
 
 Un mode effectif `paste` avec au moins un raccourci et
 `clipboard_mode="transient"` est refusé au preflight, avant capture. Le succès de
-`wtype` confirme l'émission du raccourci, jamais la lecture de la sélection par
+L’injecteur confirme l’émission du raccourci, jamais la lecture de la sélection par
 l'application cible; effacer immédiatement créerait donc une course sans
 mécanisme de confirmation fiable. Une liste `paste_shortcuts` vide ne colle pas:
 elle passe directement par `wtype -` et reste supportée, comme `type`.
@@ -87,7 +87,7 @@ Les raccourcis `wtype` supportés utilisent exactement les arguments suivants:
 
 ```text
 ctrl+shift+v  -> wtype -M ctrl -M shift v -m shift -m ctrl
-shift+insert  -> wtype -M shift Insert -m shift
+shift+insert  -> wtype -M shift -k Insert -m shift
 ctrl+v        -> wtype -M ctrl v -m ctrl
 ```
 
@@ -101,7 +101,56 @@ cible a accepté le collage. Si cette émission échoue techniquement, la livrai
 échoue; la frappe directe `wtype -` n'est utilisée que lorsque `paste_shortcuts`
 est vide.
 
-`type_newlines` applique l'un des rendus suivants à toute injection active:
+### Backend Hyprland
+
+`sink.paste_backend="wtype"` reste le défaut portable. Le choix explicite
+`"hyprland"` émet le même premier raccourci via le compositeur, sans clavier
+virtuel `wtype`. Il est notamment utile pour Ctrl+Maj+V dans Telegram Desktop
+(Qt), Chromium et les terminaux, sans imposer Ctrl+V à toutes les applications.
+
+```toml
+[sink]
+mode = "paste"
+clipboard_mode = "clean-only"
+paste_backend = "hyprland"
+paste_shortcuts = ["ctrl+shift+v"]
+```
+
+Ce backend exige `hyprctl -j status` (Hyprland 0.55+) et une session joignable.
+Il détermine la syntaxe par une lecture de `configProvider` (`lua` ou
+`hyprlang`), puis lit l’adresse de la fenêtre active et la vérifie une seconde
+fois avant dispatch. Un changement de fenêtre pendant cette préparation annule
+le collage. Le dispatcher cible l’adresse validée, pas une expression régulière
+de classe ni toutes les fenêtres. Un changement de focus après la dernière
+vérification reste une course possible, mais ne redirige pas le collage vers
+une autre fenêtre : la destination sélectionnée reste fixe.
+
+Exemples de dispatch pour Ctrl+Maj+V :
+
+```text
+Lua      : hyprctl dispatch 'hl.dsp.send_shortcut({mods="CTRL SHIFT",key="v",window="address:0x123"})'
+hyprlang : hyprctl dispatch sendshortcut 'CTRL SHIFT,v,address:0x123'
+```
+
+L’adresse doit être un entier hexadécimal non nul. Aucun titre de fenêtre,
+classe ou texte provider n’entre dans le code Lua. Les lectures et le dispatch
+partagent **un seul budget de cinq secondes**, avec sorties bornées à 64 Kio;
+les réponses contenant des titres privés ne sont jamais reprises dans les
+erreurs. La réponse du dispatcher doit être exactement `ok` (hors espaces).
+Cela confirme l’émission, pas la consommation du presse-papiers.
+
+Une session indisponible, une syntaxe inconnue, une fenêtre absente, un timeout
+ou un dispatch échoué rendent `sink_failed`, sans nouvelle tentative ni repli
+sur `wtype`. Le texte final reste dans le presse-papiers persistant. Le mode
+`--clipboard-only` n’interroge jamais Hyprland. `type`, `paste+none` et les
+raccourcis vides continuent à utiliser `wtype -`, même si le backend configuré
+est `hyprland`.
+
+La correction de `shift+insert` n’en fait pas un raccourci universel : certains
+terminaux, dont Kitty par défaut, collent la sélection PRIMARY plutôt que
+CLIPBOARD. Murmur écrit CLIPBOARD, pas PRIMARY.
+
+`type_newlines` applique l’un des rendus suivants à toute injection active:
 
 | Mode | Rendu des retours à la ligne |
 |---|---|
@@ -144,10 +193,10 @@ Cette borne de sûreté est une constante interne, pas un réglage TOML: le sch�
 commande desktop défaillante peut retenir une session.
 
 À expiration, `sysexec` envoie `SIGKILL` au groupe de processus de `wl-copy` ou
-`wtype` et attend sa récolte. La session termine en `failed/sink_failed`, puis
+`wtype` ou `hyprctl` et attend sa récolte. La session termine en `failed/sink_failed`, puis
 libère son socket et son verrou; le démarrage suivant ne dépend donc pas du
 helper défaillant.
 
 Les sinks `stdout` et `file` associés à `clipboard_mode = "none"` ne
-construisent ni n'exécutent `wl-copy` ou `wtype`; ils fonctionnent donc sans UI,
+construisent ni n’exécutent `wl-copy`, `wtype` ou `hyprctl`; ils fonctionnent donc sans UI,
 clipboard ou intégration au compositor.

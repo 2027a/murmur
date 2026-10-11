@@ -70,6 +70,7 @@ déterministe afin que toutes les commandes retrouvent la même session.
 | `sink.auto_mode` | `paste` | choix explicite `paste` ou `type` lorsque `mode=auto` |
 | `sink.clipboard_mode` | `clean-only` | `raw-and-clean`, `clean-only`, `none`, `transient` |
 | `sink.paste_shortcuts` | liste usuelle | liste ordonnée parmi `ctrl+shift+v`, `shift+insert`, `ctrl+v`; seul le premier raccourci est émis |
+| `sink.paste_backend` | `wtype` | `wtype` ou `hyprland`; seulement pour les raccourcis de collage; pas de repli après échec |
 | `sink.type_newlines` | `space` | `space`, `marker`, `dangerous-keep`; ce dernier autorise explicitement les LF en injection active |
 | `sink.file` | vide | obligatoire pour le sink `file` |
 | `ui.mode` | `notify` | `auto`, `quickshell`, `osd`, `notify`, `none` |
@@ -181,6 +182,7 @@ MURMUR_TRUSTED_NETWORKS
 MURMUR_RETAIN_DIAGNOSTICS
 MURMUR_SINK_MODE
 MURMUR_SINK_AUTO_MODE
+MURMUR_SINK_PASTE_BACKEND
 MURMUR_SINK_CLIPBOARD_MODE
 MURMUR_SINK_FILE
 MURMUR_UI_MODE
@@ -230,7 +232,7 @@ La résolution refuse notamment:
 - le sink `file` sans chemin;
 - le sink `clipboard` avec `clipboard_mode=none` ou `transient`;
 - un mode effectif `paste` avec au moins un raccourci et
-  `clipboard_mode=transient`, car `wtype` ne confirme pas la consommation du
+  `clipboard_mode=transient`, car l’injecteur ne confirme pas la consommation du
   collage avant le clear;
 - un raccourci absent de `ctrl+shift+v`, `shift+insert`, `ctrl+v`;
 - un `api_key_command` dont le nom d'exécutable est vide;

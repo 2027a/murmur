@@ -72,12 +72,12 @@ func New(cfg config.Config, options Options) (Sink, error) {
 	switch mode {
 	case Paste, Type:
 		activeNewlines = inject.NewlineMode(cfg.Sink.TypeNewlines)
-		injector, err := inject.New(options.Executor, cfg.Sink.PasteShortcuts, activeNewlines)
+		injector, err := inject.NewWithBackend(options.Executor, cfg.Sink.PasteShortcuts, activeNewlines, inject.PasteBackend(cfg.Sink.PasteBackend))
 		if err != nil {
 			return nil, err
 		}
 		if mode == Paste && clipboardMode == clipboard.Transient && len(cfg.Sink.PasteShortcuts) > 0 {
-			return nil, errs.New(errs.ConfigInvalid, "sink", "clipboard transient incompatible avec paste: wtype ne confirme pas la consommation du collage")
+			return nil, errs.New(errs.ConfigInvalid, "sink", "clipboard transient incompatible avec paste: l’injecteur ne confirme pas la consommation du collage")
 		}
 		if mode == Type || clipboardMode == clipboard.None {
 			target = sinkFunc(injector.Type)

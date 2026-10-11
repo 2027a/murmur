@@ -304,5 +304,30 @@ Encore ouvert:
 - OSD, son, live chunking, fallback cloud et plugin Markdown;
 - tout test réel d'un provider cloud.
 
+### Backend de collage Hyprland
+
+**Validé le 11 octobre 2026**, sous Hyprland 0.56.2 avec configuration Lua.
+Un programme de test temporaire a appelé le chemin Go réel `sink.New` puis
+`Deliver`, avec les réglages locaux et `paste_backend="hyprland"`. Le texte
+était une sentinelle ASCII fixe, sans retour à la ligne.
+
+- [x] Telegram Desktop déjà ouvert : collage dans le vrai champ de message,
+  vérifié par sélection/copie comparée à la sentinelle, puis suppression du
+  texte témoin. Aucun message envoyé; champ initialement vide, restauré vide.
+- [x] Chromium, profil temporaire isolé : texte exact dans un textarea local
+  (vérification DOM) et dans la barre d’adresse/recherche (sélection/copie).
+  Aucun formulaire soumis et aucune navigation déclenchée.
+- [x] Kitty avec la configuration habituelle, fenêtre isolée : texte exact reçu
+  par un programme en mode raw, avec encadrement bracketed paste; aucun shell
+  ni aucune commande issus du texte collé.
+- [x] Presse-papiers texte original restauré octet pour octet, fenêtres de test
+  fermées et profil navigateur temporaire supprimé.
+- [x] Tests automatisés des deux syntaxes de dispatcher, des changements de
+  focus, des réponses invalides, des délais et de l’absence de seconde tentative.
+
+La syntaxe hyprlang historique est couverte par tests simulés, pas par une
+session graphique réelle. Ce test ne revendique pas un nouveau cycle complet
+microphone/STT/cleanup ni les autres applications ou compositeurs.
+
 Les autres cases non cochées de cette checklist ne sont pas revendiquées comme
 validées.
