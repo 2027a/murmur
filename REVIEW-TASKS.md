@@ -944,38 +944,14 @@ segments incohérent et index dupliqués sont rejetés; les sorties réelles de
 **Vérification:** fixtures positives et négatives sous `go test -race
 ./internal/cli`.
 
-### MUR-029 - Ajouter une CI bloquante et reproductible
+### MUR-029 - CI distante reportée
 
-**Statut (31 juillet 2026): terminé, sauf validation distante nécessitant un
-push.** `.forgejo/workflows/ci.yml` exécute sur checkout propre, sans cache
-trompeur et avec timeouts, les contrôles natifs linux/amd64 sous Go 1.23.12 et
-1.26.5; un job séparé cross-build linux/arm64 ne prétend ni exécuter ni lancer le
-race detector sur arm64. Actions et versions sont épinglées. Vérifications
-locales passées: yamllint/PyYAML, `go mod verify`, `make lint`, `go test -race
-./...`, `make build`, `make installcheck` et cross-build sous les deux Go. Les
-branches volontairement cassées n'ont pas été poussées, puisqu'aucun commit ni
-push n'a été demandé; leur blocage ne peut donc pas être observé côté Forgejo.
-
-**Constat:** aucun manifeste CI n'est suivi alors que le projet s'appuie sur une
-suite de tests, le détecteur de courses, des builds multi-architecture et un
-contrat d'installation. Les affirmations de `implementation-status.md` ne sont
-pas vérifiées automatiquement à chaque changement.
-
-**Références:** `Makefile:28-84`, `docs/implementation-status.md:3-18`, absence
-de `.forgejo/workflows/`, `.github/workflows/` et `.gitlab-ci.yml`.
-
-**Travail attendu:** ajouter la CI adaptée au forge utilisé. Exécuter au minimum
-`go mod verify`, `make lint`, `go test -race ./...`, `make build` et
-`make installcheck`, avec timeouts et sans dépendance desktop ou réseau externe.
-Tester Go 1.23 et une version stable courante, ainsi que linux/amd64 et
-linux/arm64.
-
-**Critères d'acceptation:** chaque contrôle bloque une fusion lorsqu'il échoue;
-le pipeline part d'un checkout propre; les tests processus et packaging ne sont
-pas remplacés par un résultat de cache trompeur.
-
-**Vérification:** pousser une branche cassant volontairement, tour à tour, le
-formatage, un test, la race et `installcheck`.
+**Statut (29 septembre 2026): reporté sur décision de Mathieu.** Le workflow
+ajouté en juillet a été retiré : aucun runner n'est configuré sur Forgejo.
+Les contrôles restent disponibles localement dans le `Makefile`, comme décrit
+dans [`docs/implementation-status.md`](docs/implementation-status.md).
+Ne pas réintroduire de workflow sans accord explicite de Mathieu. La validation
+distante et le blocage des fusions n'ont pas été constatés.
 
 ### MUR-030 - Ajouter et installer une licence explicite
 

@@ -1,7 +1,7 @@
 """Exercise installcheck's shell control flow with real staged install/uninstall.
 
-The prebuilt binary is a tiny stand-in and build is explicitly skipped. CI still
-runs make installcheck separately with the real Go executable.
+The prebuilt binary is a tiny stand-in and build is explicitly skipped.
+Run make installcheck separately to check the real Go executable.
 """
 
 import os
