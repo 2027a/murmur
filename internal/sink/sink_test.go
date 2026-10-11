@@ -66,7 +66,7 @@ func TestPasteSinkCommandSequence(t *testing.T) {
 	}
 	want := []call{
 		{name: "wl-copy", stdin: "final"},
-		{name: "wtype", args: []string{"-M", "ctrl", "-M", "shift", "v", "-m", "shift", "-m", "ctrl"}},
+		{name: "wtype", args: []string{"-M", "ctrl", "v", "-m", "ctrl"}},
 	}
 	if !reflect.DeepEqual(executor.calls, want) {
 		t.Fatalf("calls = %#v, want %#v", executor.calls, want)

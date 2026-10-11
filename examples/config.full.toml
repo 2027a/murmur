@@ -82,11 +82,18 @@ retain_diagnostics = false
 mode = "paste"
 auto_mode = "paste"
 clipboard_mode = "clean-only"
-paste_shortcuts = ["ctrl+shift+v", "shift+insert", "ctrl+v"]
+paste_shortcuts = ["ctrl+v"]
 # hyprland : raccourcis natifs du compositeur (hyprctl -j status requis).
 paste_backend = "wtype"
 type_newlines = "space"
 file = ""
+
+# Règles optionnelles : mettre paste_backend = "hyprland" avant de les activer.
+# Classe de fenêtre exacte, sans distinction de casse; première correspondance.
+# [[sink.paste_rules]]
+# class = "kitty"
+# shortcut = "ctrl+shift+v"
+# Les terminaux intégrés à un IDE ne sont pas distingués de son éditeur.
 
 [ui]
 # auto : module QuickShell fonctionnel, sinon notifications.

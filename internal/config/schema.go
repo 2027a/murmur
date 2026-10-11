@@ -108,13 +108,20 @@ type PolicyConfig struct {
 }
 
 type SinkConfig struct {
-	Mode           string   `toml:"mode"`
-	AutoMode       string   `toml:"auto_mode"`
-	ClipboardMode  string   `toml:"clipboard_mode"`
-	PasteShortcuts []string `toml:"paste_shortcuts"`
-	PasteBackend   string   `toml:"paste_backend"`
-	TypeNewlines   string   `toml:"type_newlines"`
-	File           string   `toml:"file"`
+	Mode           string      `toml:"mode"`
+	AutoMode       string      `toml:"auto_mode"`
+	ClipboardMode  string      `toml:"clipboard_mode"`
+	PasteShortcuts []string    `toml:"paste_shortcuts"`
+	PasteBackend   string      `toml:"paste_backend"`
+	PasteRules     []PasteRule `toml:"paste_rules"`
+	TypeNewlines   string      `toml:"type_newlines"`
+	File           string      `toml:"file"`
+}
+
+// PasteRule matches an exact Hyprland window class, case-insensitively.
+type PasteRule struct {
+	Class    string `toml:"class"`
+	Shortcut string `toml:"shortcut"`
 }
 
 type UIConfig struct {
@@ -173,7 +180,7 @@ func Defaults() Config {
 			Mode:           "paste",
 			AutoMode:       "paste",
 			ClipboardMode:  "clean-only",
-			PasteShortcuts: []string{"ctrl+shift+v", "shift+insert", "ctrl+v"},
+			PasteShortcuts: []string{"ctrl+v"},
 			PasteBackend:   "wtype",
 			TypeNewlines:   "space",
 		},

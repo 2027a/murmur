@@ -323,20 +323,33 @@ se termine après livraison ou annulation.
 
 `sink.mode` accepte `paste`, `type`, `clipboard`, `stdout`, `file` et `auto`.
 `auto` devient le choix explicite `sink.auto_mode="paste"|"type"`, indépendamment
-du profil de données. `paste` copie puis émet uniquement le premier raccourci
-configuré avec le backend `sink.paste_backend="wtype"` (défaut) ou `"hyprland"`.
-Sous Hyprland, ce dernier conserve Ctrl+Maj+V tout en évitant les différences
-entre les raccourcis Qt de Telegram Desktop et le clavier virtuel de `wtype`:
+du profil de données. `paste` copie puis émet uniquement le raccourci sélectionné
+(règle par application ou premier élément de `paste_shortcuts`) avec le backend `sink.paste_backend="wtype"` (défaut) ou `"hyprland"`.
+Le raccourci par défaut est Ctrl+V, adapté aux champs GTK, Qt et aux navigateurs.
+Sous Hyprland, des règles permettent de conserver Ctrl+Maj+V dans les terminaux,
+sans les différences entre les raccourcis Qt et le clavier virtuel de `wtype`:
 
 ```toml
 [sink]
 paste_backend = "hyprland"
-paste_shortcuts = ["ctrl+shift+v"]
+paste_shortcuts = ["ctrl+v"]
+
+[[sink.paste_rules]]
+class = "kitty"
+shortcut = "ctrl+shift+v"
 ```
 
 Il exige une session joignable et `hyprctl -j status` (Hyprland 0.55+), détecte
 le dispatcher Lua ou hyprlang, cible la fenêtre active au moment de la livraison
-et ne tente aucun autre backend en cas d’échec. Voir [Sinks](docs/sinks.md).
+et ne tente aucun autre backend en cas d’échec. Les règles exigent ce backend,
+sont comparées exactement à la classe de fenêtre, sans distinction de casse,
+et la première correspondance remplace le raccourci par défaut. Une classe
+manquante ou modifiée pendant la préparation annule le collage. Les anciennes
+listes explicitement configurées restent inchangées.
+
+Une classe de fenêtre ne distingue pas l’éditeur du terminal intégré d’un IDE :
+pour ce dernier, utiliser `--clipboard-only` et coller manuellement. Cette version
+ne fait pas de détection du champ par accessibilité. Voir [Sinks](docs/sinks.md).
 Si la liste de raccourcis est vide, ou avec
 `clipboard_mode="none"`, il frappe directement et ne colle jamais un ancien
 presse-papiers.

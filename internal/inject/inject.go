@@ -28,6 +28,7 @@ type Injector struct {
 	newlines  NewlineMode
 	backend   PasteBackend
 	shortcut  string
+	rules     []PasteRule
 }
 
 // New keeps the historical wtype backend for existing callers.
@@ -35,9 +36,15 @@ func New(executor sysexec.Executor, shortcuts []string, newlines NewlineMode) (*
 	return NewWithBackend(executor, shortcuts, newlines, Wtype)
 }
 
-func NewWithBackend(executor sysexec.Executor, shortcuts []string, newlines NewlineMode, backend PasteBackend) (*Injector, error) {
+func NewWithBackend(executor sysexec.Executor, shortcuts []string, newlines NewlineMode, backend PasteBackend, rules ...PasteRule) (*Injector, error) {
 	if backend != Wtype && backend != Hyprland {
 		return nil, errs.New(errs.ConfigInvalid, "inject", "backend de collage inconnu")
+	}
+	if len(rules) > 0 && backend != Hyprland {
+		return nil, errs.New(errs.ConfigInvalid, "inject", "les règles par application exigent le backend hyprland")
+	}
+	if err := validatePasteRules(rules); err != nil {
+		return nil, errs.Wrap(errs.ConfigInvalid, "inject", "règles de collage invalides", err)
 	}
 	if executor == nil {
 		return nil, errs.New(errs.ConfigInvalid, "inject", "aucun exécuteur disponible")
@@ -57,7 +64,7 @@ func NewWithBackend(executor sysexec.Executor, shortcuts []string, newlines Newl
 	if len(shortcuts) > 0 {
 		first = shortcuts[0]
 	}
-	return &Injector{executor: executor, shortcuts: parsed, newlines: newlines, backend: backend, shortcut: first}, nil
+	return &Injector{executor: executor, shortcuts: parsed, newlines: newlines, backend: backend, shortcut: first, rules: append([]PasteRule(nil), rules...)}, nil
 }
 
 // Type sends text to wtype's stdin after applying the newline policy.
@@ -75,8 +82,8 @@ func (i *Injector) typeText(ctx context.Context, text string) error {
 	return nil
 }
 
-// Paste performs a single active injection attempt: the first configured
-// shortcut, or direct typing when no shortcut is configured.
+// Paste performs a single active injection attempt: an application rule or the
+// first configured shortcut, or direct typing when no shortcut is configured.
 func (i *Injector) Paste(ctx context.Context, text string) error {
 	commandCtx, cancel := context.WithTimeout(ctx, delivery.CommandTimeout)
 	defer cancel()

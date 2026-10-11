@@ -329,5 +329,43 @@ La syntaxe hyprlang historique est couverte par tests simulés, pas par une
 session graphique réelle. Ce test ne revendique pas un nouveau cycle complet
 microphone/STT/cleanup ni les autres applications ou compositeurs.
 
+### Règles de collage par application
+
+**Validé le 11 octobre 2026 (UTC)**, sur la même session Hyprland Lua. Le
+programme temporaire a utilisé le vrai `sink.New` → `Deliver`, avec Ctrl+V par
+défaut et des règles Ctrl+Maj+V pour `kitty` et la classe personnalisée
+`kitty-dropterm`. Il s’agit d’une validation ciblée du sink, pas d’un nouveau
+cycle microphone/STT/cleanup ni de toute la checklist avec binaire installé.
+
+- [x] GTK 3 et GTK 4 : `Entry` et `TextView` isolés, texte exact lu directement
+  dans les widgets après livraison.
+- [x] Geany : éditeur d’un fichier temporaire et champ de recherche, texte exact
+  vérifié par sélection/copie; instance et configuration isolées, plugins,
+  session et terminal intégré désactivés. Aucune recherche exécutée et aucun
+  document utilisateur modifié.
+- [x] Thunar : barre d’emplacement dans un répertoire temporaire, texte exact
+  par sélection/copie, sans navigation; bus D-Bus et configuration isolés.
+- [x] Zenity : champ d’un dialogue `--entry`, texte exact par sélection/copie,
+  sans valider le dialogue.
+- [x] Telegram Desktop : champ de message initialement vide, copie exacte de la
+  sentinelle puis suppression, sans envoyer de message.
+- [x] Chromium : textarea local (DOM) et barre d’adresse, sans soumission ni
+  navigation. Le textarea a été réellement focalisé, pas seulement par
+  `HTMLElement.focus()` qui peut laisser le focus natif dans l’omnibox au
+  démarrage d’un profil neuf.
+- [x] Kitty, classes `kitty` et `kitty-dropterm` : deux récepteurs raw isolés
+  sans shell, texte exact et encadrement bracketed paste.
+- [x] Presse-papiers texte restauré octet pour octet à la fin des validations;
+  sélection GTK restaurée avant de fermer son propriétaire Wayland. Fenêtres
+  et profils de test retirés, sauf l’application Telegram existante.
+- [x] Tests `-race` : parsing/validation TOML, priorité et casse des classes,
+  absence de correspondance, classe manquante ou changée, copie des règles,
+  aucune seconde tentative ni injection de métadonnées, et chemins sans
+  collage natif toujours sans lecture Hyprland.
+
+Limites maintenues : les terminaux intégrés à un IDE ne sont pas distingués de
+l’éditeur; les raccourcis personnalisés demandent leurs propres règles. La
+syntaxe hyprlang est simulée, et aucun autre compositeur n’est revendiqué.
+
 Les autres cases non cochées de cette checklist ne sont pas revendiquées comme
 validées.
