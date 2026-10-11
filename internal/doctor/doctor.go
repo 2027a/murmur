@@ -13,6 +13,7 @@ import (
 
 	"git.2027a.net/2027a/murmur/internal/config"
 	"git.2027a.net/2027a/murmur/internal/core"
+	"git.2027a.net/2027a/murmur/internal/inject"
 	"git.2027a.net/2027a/murmur/internal/sysexec"
 	"git.2027a.net/2027a/murmur/internal/ui"
 	"git.2027a.net/2027a/murmur/internal/xdg"
@@ -106,6 +107,11 @@ func Run(ctx context.Context, cfg config.Config, dependencies Dependencies) Repo
 	for _, tool := range sinkTools(cfg) {
 		addTool(&report, d.LookPath, "sink: "+tool, tool)
 	}
+	if usesHyprlandPaste(cfg) {
+		add("sink: session Hyprland", timedCheck(ctx, d.ExternalTimeout, func(checkCtx context.Context) error {
+			return inject.CheckHyprland(checkCtx, d.Executor)
+		}))
+	}
 	if cfg.Sink.Mode == "file" {
 		add("fichier de sortie", d.File(cfg.Sink.File))
 	}
@@ -191,10 +197,17 @@ func sinkTools(cfg config.Config) []string {
 	if cfg.Sink.ClipboardMode != "none" {
 		needed["wl-copy"] = true
 	}
-	switch cfg.Sink.Mode {
-	case "paste", "auto":
-		needed["wl-copy"] = true
-		needed["wtype"] = true
+	mode := cfg.Sink.Mode
+	if mode == "auto" {
+		mode = cfg.Sink.AutoMode
+	}
+	switch mode {
+	case "paste":
+		if usesHyprlandPaste(cfg) {
+			needed["hyprctl"] = true
+		} else {
+			needed["wtype"] = true
+		}
 	case "type":
 		needed["wtype"] = true
 	case "clipboard":
@@ -206,6 +219,11 @@ func sinkTools(cfg config.Config) []string {
 	}
 	sort.Strings(tools)
 	return tools
+}
+
+func usesHyprlandPaste(cfg config.Config) bool {
+	paste := cfg.Sink.Mode == "paste" || (cfg.Sink.Mode == "auto" && cfg.Sink.AutoMode == "paste")
+	return paste && cfg.Sink.PasteBackend == "hyprland" && cfg.Sink.ClipboardMode != "none" && len(cfg.Sink.PasteShortcuts) > 0
 }
 
 func addTool(report *Report, lookup func(string) (string, error), name, tool string) {

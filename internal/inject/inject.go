@@ -26,9 +26,19 @@ type Injector struct {
 	executor  sysexec.Executor
 	shortcuts [][]string
 	newlines  NewlineMode
+	backend   PasteBackend
+	shortcut  string
 }
 
+// New keeps the historical wtype backend for existing callers.
 func New(executor sysexec.Executor, shortcuts []string, newlines NewlineMode) (*Injector, error) {
+	return NewWithBackend(executor, shortcuts, newlines, Wtype)
+}
+
+func NewWithBackend(executor sysexec.Executor, shortcuts []string, newlines NewlineMode, backend PasteBackend) (*Injector, error) {
+	if backend != Wtype && backend != Hyprland {
+		return nil, errs.New(errs.ConfigInvalid, "inject", "backend de collage inconnu")
+	}
 	if executor == nil {
 		return nil, errs.New(errs.ConfigInvalid, "inject", "aucun exécuteur disponible")
 	}
@@ -43,7 +53,11 @@ func New(executor sysexec.Executor, shortcuts []string, newlines NewlineMode) (*
 		}
 		parsed[i] = args
 	}
-	return &Injector{executor: executor, shortcuts: parsed, newlines: newlines}, nil
+	var first string
+	if len(shortcuts) > 0 {
+		first = shortcuts[0]
+	}
+	return &Injector{executor: executor, shortcuts: parsed, newlines: newlines, backend: backend, shortcut: first}, nil
 }
 
 // Type sends text to wtype's stdin after applying the newline policy.
@@ -69,6 +83,9 @@ func (i *Injector) Paste(ctx context.Context, text string) error {
 	if len(i.shortcuts) == 0 {
 		return i.typeText(commandCtx, text)
 	}
+	if i.backend == Hyprland {
+		return i.pasteHyprland(commandCtx)
+	}
 	if err := sysexec.RunDiscard(commandCtx, i.executor, "wtype", i.shortcuts[0], nil); err != nil {
 		return commandError(commandCtx, "collage simulé impossible", err)
 	}
@@ -87,7 +104,7 @@ func shortcutArgs(shortcut string) ([]string, bool) {
 	case "ctrl+shift+v":
 		return []string{"-M", "ctrl", "-M", "shift", "v", "-m", "shift", "-m", "ctrl"}, true
 	case "shift+insert":
-		return []string{"-M", "shift", "Insert", "-m", "shift"}, true
+		return []string{"-M", "shift", "-k", "Insert", "-m", "shift"}, true
 	case "ctrl+v":
 		return []string{"-M", "ctrl", "v", "-m", "ctrl"}, true
 	default:

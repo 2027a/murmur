@@ -68,6 +68,9 @@ func Validate(cfg Config) error {
 	if !oneOf(cfg.Sink.AutoMode, "paste", "type") {
 		return configError("sink.auto_mode doit valoir paste ou type")
 	}
+	if !oneOf(cfg.Sink.PasteBackend, "wtype", "hyprland") {
+		return configError("sink.paste_backend doit valoir wtype ou hyprland")
+	}
 	if !oneOf(cfg.Sink.ClipboardMode, "raw-and-clean", "clean-only", "none", "transient") {
 		return configError("sink.clipboard_mode invalide")
 	}
@@ -81,7 +84,7 @@ func Validate(cfg Config) error {
 	}
 	effectivePaste := cfg.Sink.Mode == "paste" || (cfg.Sink.Mode == "auto" && cfg.Sink.AutoMode == "paste")
 	if effectivePaste && cfg.Sink.ClipboardMode == "transient" && len(cfg.Sink.PasteShortcuts) > 0 {
-		return configError("sink.clipboard_mode=transient est incompatible avec un sink effectif paste: wtype ne confirme pas la consommation du collage")
+		return configError("sink.clipboard_mode=transient est incompatible avec un sink effectif paste: l’injecteur ne confirme pas la consommation du collage")
 	}
 	if !oneOf(cfg.Sink.TypeNewlines, "space", "marker", "dangerous-keep") {
 		return configError("sink.type_newlines doit valoir space, marker ou dangerous-keep")

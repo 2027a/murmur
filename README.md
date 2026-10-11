@@ -69,7 +69,8 @@ script complet; aucun chemin vers le checkout n'est requis à l'exécution.
 | toute capture | PipeWire et `pw-record` |
 | source PipeWire explicite vérifiée par `doctor` | `pw-cli` |
 | presse-papiers | `wl-copy` (`wl-clipboard`) |
-| sinks `paste` ou `type` | `wtype`; `paste` utilise aussi `wl-copy` sauf avec `clipboard_mode="none"` |
+| collage avec raccourci | `wl-copy` et `wtype` par défaut, ou `hyprctl` avec `sink.paste_backend="hyprland"` |
+| frappe (`type`, `paste` sans raccourci ou avec clipboard `none`) | `wtype`; `wl-copy` selon la politique clipboard |
 | UI `notify` | bus D-Bus de session et service `org.freedesktop.Notifications` |
 | UI `osd` | helper optionnel `murmur-osd`, Python 3, PyGObject GTK3 et gtk-layer-shell |
 | `ui.sound=true` | `pw-play`, `paplay` ou `canberra-gtk-play`, plus le son freedesktop par défaut |
@@ -323,7 +324,20 @@ se termine après livraison ou annulation.
 `sink.mode` accepte `paste`, `type`, `clipboard`, `stdout`, `file` et `auto`.
 `auto` devient le choix explicite `sink.auto_mode="paste"|"type"`, indépendamment
 du profil de données. `paste` copie puis émet uniquement le premier raccourci
-configuré avec `wtype`. Si la liste de raccourcis est vide, ou avec
+configuré avec le backend `sink.paste_backend="wtype"` (défaut) ou `"hyprland"`.
+Sous Hyprland, ce dernier conserve Ctrl+Maj+V tout en évitant les différences
+entre les raccourcis Qt de Telegram Desktop et le clavier virtuel de `wtype`:
+
+```toml
+[sink]
+paste_backend = "hyprland"
+paste_shortcuts = ["ctrl+shift+v"]
+```
+
+Il exige une session joignable et `hyprctl -j status` (Hyprland 0.55+), détecte
+le dispatcher Lua ou hyprlang, cible la fenêtre active au moment de la livraison
+et ne tente aucun autre backend en cas d’échec. Voir [Sinks](docs/sinks.md).
+Si la liste de raccourcis est vide, ou avec
 `clipboard_mode="none"`, il frappe directement et ne colle jamais un ancien
 presse-papiers.
 
@@ -347,7 +361,7 @@ fenêtre d'annulation est fermée atomiquement avant la première copie; un éch
 copie rend `failed/sink_failed`. Les modes persistants ne sont pas effacés sur
 erreur et Murmur ne prétend jamais purger un gestionnaire d'historique ayant déjà
 capturé le texte. Un mode effectif `paste` avec raccourci et `transient` est
-refusé avant capture: `wtype` ne confirme que l'émission du raccourci, pas la
+refusé avant capture: l’injecteur ne confirme que l’émission du raccourci, pas la
 consommation du collage avant le clear. Les alternatives sont `clean-only` pour
 un collage persistant, `type+transient` pour un clear best-effort, ou
 `type+none` pour ne jamais exposer le texte au presse-papiers. Une liste de
@@ -359,7 +373,7 @@ composables.
 
 Chaque copie, frappe, clear ou tentative de collage est bornée à 5 secondes. Le
 budget est une constante de sûreté, pas une option de
-configuration. Un `wl-copy` ou `wtype` bloqué voit son groupe de processus tué et
+configuration. Un `wl-copy`, `wtype` ou `hyprctl` bloqué voit son groupe de processus tué et
 récolté; la session rend `failed/sink_failed`, libère verrou et socket, puis une
 nouvelle session peut démarrer.
 

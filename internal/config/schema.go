@@ -112,6 +112,7 @@ type SinkConfig struct {
 	AutoMode       string   `toml:"auto_mode"`
 	ClipboardMode  string   `toml:"clipboard_mode"`
 	PasteShortcuts []string `toml:"paste_shortcuts"`
+	PasteBackend   string   `toml:"paste_backend"`
 	TypeNewlines   string   `toml:"type_newlines"`
 	File           string   `toml:"file"`
 }
@@ -173,6 +174,7 @@ func Defaults() Config {
 			AutoMode:       "paste",
 			ClipboardMode:  "clean-only",
 			PasteShortcuts: []string{"ctrl+shift+v", "shift+insert", "ctrl+v"},
+			PasteBackend:   "wtype",
 			TypeNewlines:   "space",
 		},
 		UI: UIConfig{
@@ -216,6 +218,7 @@ type Overrides struct {
 	RetainDiagnostics *bool
 	SinkMode          *string
 	SinkAutoMode      *string
+	PasteBackend      *string
 	ClipboardMode     *string
 	SinkFile          *string
 	UIMode            *string

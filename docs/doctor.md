@@ -66,8 +66,9 @@ Checks ajoutes selon la configuration:
 | provider avec un `api_key_*` | resolution du credential, sans l'afficher |
 | `cleanup.enabled=true` | credential éventuel; health ignoré car le schéma cleanup n'en expose pas |
 | `sink.clipboard_mode != "none"` | `wl-copy` |
-| `sink.mode=paste` ou `auto` | `wl-copy`, `wtype` |
-| `sink.mode=type` | `wtype` |
+| collage effectif avec raccourci et `paste_backend=wtype` | `wtype` |
+| collage effectif avec raccourci et `paste_backend=hyprland` | `hyprctl`, session et syntaxe via `hyprctl -j status`, sans envoyer de touches |
+| frappe effective (`type`, raccourcis vides ou clipboard `none`) | `wtype`; aucune interrogation de Hyprland |
 | `sink.mode=clipboard` | `wl-copy` |
 | `sink.mode=file` | fichier existant inscriptible ou parent permettant sa creation |
 | `ui.mode=notify` | bus de session et `org.freedesktop.Notifications` joignables |
@@ -77,7 +78,8 @@ Checks ajoutes selon la configuration:
 | `ui.sound=true` | au moins un de `pw-play`, `paplay`, `canberra-gtk-play` |
 
 Une configuration `sink.mode="stdout"`, `sink.clipboard_mode="none"` et
-`ui.mode="none"` ne verifie donc ni `wl-copy`, ni `wtype`, ni D-Bus, ni OSD.
+`ui.mode="none"` ne verifie donc ni `wl-copy`, ni `wtype`, ni `hyprctl`, ni D-Bus, ni OSD.
+`auto` est interprété selon `sink.auto_mode` pour ces checks.
 Un provider present dans une table mais non reference comme principal,
 fallback ou cleanup actif est ignore, credential compris. C'est le scenario
 d'acceptation 14.
